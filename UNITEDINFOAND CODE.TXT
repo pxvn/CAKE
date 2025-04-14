@@ -1,0 +1,3591 @@
+feedback
+#include <SCServo.h>
+SCSCL sc;
+int ID_input = 1;  // Default servo ID
+#define S_RXD 18
+#define S_TXD 19
+
+void setup() {
+  Serial1.begin(1000000, SERIAL_8N1, S_RXD, S_TXD);
+  Serial.begin(115200);
+  sc.pSerial = &Serial1;
+  delay(1000);
+  Serial.println("Enter Servo ID (0-253):");
+}
+
+void loop() {
+  // Check for new ID input
+  if (Serial.available() > 0) {
+    int newID = Serial.parseInt();
+    if (newID >= 0 && newID <= 253) {
+      ID_input = newID;
+      Serial.print("\nServo ID set to: ");
+      Serial.println(ID_input);
+    } else {
+      Serial.println("\nInvalid ID. Please enter between 0-253.");
+    }
+    // Clear serial buffer
+    while (Serial.available() > 0) Serial.read();
+  }
+
+  int Pos, Speed, Load, Voltage, Temper, Move;
+  
+  if (sc.FeedBack(ID_input) != -1) {
+    Pos = sc.ReadPos(-1);
+    Speed = sc.ReadSpeed(-1);
+    Load = sc.ReadLoad(-1);
+    Voltage = sc.ReadVoltage(-1);
+    Temper = sc.ReadTemper(-1);
+    Move = sc.ReadMove(-1);
+
+    Serial.println("-------------------------");
+    Serial.print("Position: "); Serial.println(Pos);
+    Serial.print("Speed:    "); Serial.println(Speed);
+    Serial.print("Load:     "); Serial.println(Load);
+    Serial.print("Voltage:  "); Serial.println(Voltage);
+    Serial.print("Temp:     "); Serial.println(Temper);
+    Serial.print("Moving:   "); Serial.println(Move);
+    Serial.println("-------------------------");
+  } else {
+    Serial.print("Error reading from servo ID ");
+    Serial.println(ID_input);
+  }
+  
+  delay(500);
+}
+stservodriver.ino
+// WIFI_AP settings.
+const char* AP_SSID = "ESP32_DEV";
+const char* AP_PWD  = "12345678";
+
+// WIFI_STA settings.
+const char* STA_SSID = "OnePlus 8";
+const char* STA_PWD  = "40963840";
+
+// the MAC address of the device you want to ctrl.
+uint8_t broadcastAddress[] = {0x08, 0x3A, 0xF2, 0x93, 0x5F, 0xA8};
+// uint8_t broadcastAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+
+typedef struct struct_message {
+  int ID_send;
+  int POS_send;
+  int Spd_send;
+} struct_message;
+
+// Create a struct_message called myData
+struct_message myData;
+
+
+// set the default role here.
+// 0 as normal mode.
+// 1 as leader, ctrl other device via ESP-NOW.
+// 2 as follower, can be controled via ESP-NOW.
+#define DEFAULT_ROLE 0
+
+
+// set the default wifi mode here.
+// 1 as [AP] mode, it will not connect other wifi.
+// 2 as [STA] mode, it will connect to know wifi.
+#define DEFAULT_WIFI_MODE 1
+
+// the uart used to control servos.
+// GPIO 18 - S_RXD, GPIO 19 - S_TXD, as default.
+#define S_RXD 18
+#define S_TXD 19
+
+// the IIC used to control OLED screen.
+// GPIO 21 - S_SDA, GPIO 22 - S_SCL, as default.
+#define S_SCL 22
+#define S_SDA 21
+
+// the GPIO used to control RGB LEDs.
+// GPIO 23, as default.
+#define RGB_LED   23
+#define NUMPIXELS 10
+
+// set the max ID.
+int MAX_ID = 20;
+
+// modeSelected.
+// set the SERIAL_FORWARDING as true to control the servos with USB.
+bool SERIAL_FORWARDING = false;
+
+// OLED Screen Dispaly.
+// Row1: MAC address.
+// Row2: VCC --- IP address.
+// Row3: MODE:Leader/Follower  [AP]/[STA][RSSI]
+//       DEFAULT_ROLE: 1-Leader(L)/ 2-Follower(F).
+//       DEFAULT_WIFI_MODE: 1-[AP]/ 2-[STA][RSSI] / 3-[TRY:SSID].
+//       (no matter what wifi mode you select, you can always ctrl it via ESP-NOW.)
+// Row4: the position of servo 1, 2 and 3.
+String MAC_ADDRESS;
+IPAddress IP_ADDRESS;
+byte   SERVO_NUMBER;
+byte   DEV_ROLE;
+byte   WIFI_MODE;
+int    WIFI_RSSI;
+
+// set the interval of the threading.
+#define threadingInterval 600
+#define clientInterval    10
+
+#if CONFIG_FREERTOS_UNICORE
+#define ARDUINO_RUNNING_CORE 0
+#else
+#define ARDUINO_RUNNING_CORE 1
+#endif
+
+#include "RGB_CTRL.h"
+#include "STSCTRL.h"
+#include "CONNECT.h"
+#include "BOARD_DEV.h"
+
+
+void setup() {
+  Serial.begin(115200);
+  while(!Serial) {}
+
+  InitRGB();
+
+  espNowInit();
+
+  getMAC();
+  
+  boardDevInit();
+
+  RGBcolor(0, 64, 255);
+
+  servoInit();
+
+  wifiInit();
+
+  webServerSetup();
+
+  RGBoff();
+
+  delay(1000);
+  pingAll(true);
+
+  threadInit();
+}
+
+
+void loop() {
+  delay(300000);
+}
+
+
+// > > > > > > > > > DOC < < < < < < < < <
+// === Develop Board Ctrl ===
+// get the MAC address and save it in MAC_ADDRESS;
+// getMAC();
+
+// Init GPIO.
+// pinMode(PIN_NUM, OUTPUT);
+// pinMode(PIN_NUM, INPUT_PULLUP);
+
+// set the level of GPIO.
+// digitalWrite(PIN_NUM, LOW);
+// digitalWrite(PIN_NUM, HIGH);
+
+// PWM output(GPIO).
+// int freq = 50;
+// resolution = 12;
+// ledcSetup(PWM_NUM, frep, resolution);
+// ledcAttachPin(PIN_NUM, PWM_NUM);
+// ledcWrite(PWM_NUM, PWM);
+
+
+// === Servo Ctrl ===
+// GPIO 18 as RX, GPIO 19 as TX, init the serial and the servos.
+// servoInit();
+
+// set the position as middle pos.
+// setMiddle(servoID);
+// st.WritePosEx(ID, position, speed, acc);
+
+
+
+// === Devices Ctrl ===
+// ctrl the RGB.
+// 0 < (R, G, B) <= 255
+// setSingleLED(LED_ID, matrix.Color(R, G, B));
+
+// init the OLED screen, RGB_LED.
+// boardDevInit();
+
+// dispaly the newest information on the screen.
+// screenUpdate();
+/*
+ * INST.h
+ * directive definition header file for waveshare serial bus servos.
+ * date: 2023.6.28 
+ */
+
+#ifndef _INST_H
+#define _INST_H
+
+typedef	char s8;
+typedef	unsigned char u8;	
+typedef	unsigned short u16;	
+typedef	short s16;
+typedef	unsigned long u32;	
+typedef	long s32;
+
+#define INST_PING 0x01
+#define INST_READ 0x02
+#define INST_WRITE 0x03
+#define INST_REG_WRITE 0x04
+#define INST_REG_ACTION 0x05
+#define INST_SYNC_READ 0x82
+#define INST_SYNC_WRITE 0x83
+
+//波特率定义
+#define	_1M 0
+#define	_0_5M 1
+#define	_250K 2
+#define	_128K 3
+#define	_115200 4
+#define	_76800 5
+#define	_57600 6
+#define	_38400 7
+#define	_19200 8
+#define	_14400 9
+#define	_9600 10
+#define	_4800 11
+
+#endif
+name=SCSservo
+version=1.0.1
+author=waveshare
+maintainer=waveshare
+sentence=SC/ST servo ctrl for ESP32 and Arduino
+paragraph=SC/ST servo ctrl for ESP32 and Arduino
+category=Other
+url=https://github.com/waveshare/
+architectures=*
+﻿/*
+ * SCS.cpp
+ * communication layer for serial bus servo
+ * date: 2023.6.28
+ */
+
+#include <stddef.h>
+#include "SCS.h"
+
+SCS::SCS()
+{
+	Level = 1; // all commands except broadcast command return response
+	Error = 0;
+}
+
+SCS::SCS(u8 End)
+{
+	Level = 1;
+	this->End = End;
+	Error = 0;
+}
+
+SCS::SCS(u8 End, u8 Level)
+{
+	this->Level = Level;
+	this->End = End;
+	Error = 0;
+}
+
+// one 16-digit number split into two 8-digit numbers
+// DataL is low, DataH is high
+void SCS::Host2SCS(u8 *DataL, u8* DataH, u16 Data)
+{
+	if(End){
+		*DataL = (Data>>8);
+		*DataH = (Data&0xff);
+	}else{
+		*DataH = (Data>>8);
+		*DataL = (Data&0xff);
+	}
+}
+
+// combination of two 8-digit numbers into one 16-digit number
+// DataL is low, DataH is high
+u16 SCS::SCS2Host(u8 DataL, u8 DataH)
+{
+	u16 Data;
+	if(End){
+		Data = DataL;
+		Data<<=8;
+		Data |= DataH;
+	}else{
+		Data = DataH;
+		Data<<=8;
+		Data |= DataL;
+	}
+	return Data;
+}
+
+void SCS::writeBuf(u8 ID, u8 MemAddr, u8 *nDat, u8 nLen, u8 Fun)
+{
+	u8 msgLen = 2;
+	u8 bBuf[6];
+	u8 CheckSum = 0;
+	bBuf[0] = 0xff;
+	bBuf[1] = 0xff;
+	bBuf[2] = ID;
+	bBuf[4] = Fun;
+	if(nDat){
+		msgLen += nLen + 1;
+		bBuf[3] = msgLen;
+		bBuf[5] = MemAddr;
+		writeSCS(bBuf, 6);
+		
+	}else{
+		bBuf[3] = msgLen;
+		writeSCS(bBuf, 5);
+	}
+	CheckSum = ID + msgLen + Fun + MemAddr;
+	u8 i = 0;
+	if(nDat){
+		for(i=0; i<nLen; i++){
+			CheckSum += nDat[i];
+		}
+		writeSCS(nDat, nLen);
+	}
+	writeSCS(~CheckSum);
+}
+
+// general write command.
+// the ID of the servo, the memory address in memory table, the data to write, the length of data
+int SCS::genWrite(u8 ID, u8 MemAddr, u8 *nDat, u8 nLen)
+{
+	rFlushSCS();
+	writeBuf(ID, MemAddr, nDat, nLen, INST_WRITE);
+	wFlushSCS();
+	return Ack(ID);
+}
+
+// write asynchronously.
+// the ID of the servo，the memory address in memory table，the data to write，the length of data
+int SCS::regWrite(u8 ID, u8 MemAddr, u8 *nDat, u8 nLen)
+{
+	rFlushSCS();
+	writeBuf(ID, MemAddr, nDat, nLen, INST_REG_WRITE);
+	wFlushSCS();
+	return Ack(ID);
+}
+
+// the trigger command for regWrite()
+// call this function to start the regWrite() command
+// ID: the ID of the servo
+int SCS::RegWriteAction(u8 ID)
+{
+	rFlushSCS();
+	writeBuf(ID, 0, NULL, 0, INST_REG_ACTION);
+	wFlushSCS();
+	return Ack(ID);
+}
+
+// write synchronously.
+// the list of servo IDs, the length(number) of the ID list, the memory address in memory table,
+// the data to write, the length of data.
+void SCS::syncWrite(u8 ID[], u8 IDN, u8 MemAddr, u8 *nDat, u8 nLen)
+{
+	rFlushSCS();
+	u8 mesLen = ((nLen+1)*IDN+4);
+	u8 Sum = 0;
+	u8 bBuf[7];
+	bBuf[0] = 0xff;
+	bBuf[1] = 0xff;
+	bBuf[2] = 0xfe;
+	bBuf[3] = mesLen;
+	bBuf[4] = INST_SYNC_WRITE;
+	bBuf[5] = MemAddr;
+	bBuf[6] = nLen;
+	writeSCS(bBuf, 7);
+
+	Sum = 0xfe + mesLen + INST_SYNC_WRITE + MemAddr + nLen;
+	u8 i, j;
+	for(i=0; i<IDN; i++){
+		writeSCS(ID[i]);
+		writeSCS(nDat+i*nLen, nLen);
+		Sum += ID[i];
+		for(j=0; j<nLen; j++){
+			Sum += nDat[i*nLen+j];
+		}
+	}
+	writeSCS(~Sum);
+	wFlushSCS();
+}
+
+int SCS::writeByte(u8 ID, u8 MemAddr, u8 bDat)
+{
+	rFlushSCS();
+	writeBuf(ID, MemAddr, &bDat, 1, INST_WRITE);
+	wFlushSCS();
+	return Ack(ID);
+}
+
+int SCS::writeWord(u8 ID, u8 MemAddr, u16 wDat)
+{
+	u8 bBuf[2];
+	Host2SCS(bBuf+0, bBuf+1, wDat);
+	rFlushSCS();
+	writeBuf(ID, MemAddr, bBuf, 2, INST_WRITE);
+	wFlushSCS();
+	return Ack(ID);
+}
+
+// read command
+// the ID of servo, the memory address in memory table, the return data, the length of data
+int SCS::Read(u8 ID, u8 MemAddr, u8 *nData, u8 nLen)
+{
+	rFlushSCS();
+	writeBuf(ID, MemAddr, &nLen, 1, INST_READ);
+	wFlushSCS();
+	if(!checkHead()){
+		return 0;
+	}
+	u8 bBuf[4];
+	Error = 0;
+	if(readSCS(bBuf, 3)!=3){
+		return 0;
+	}
+	int Size = readSCS(nData, nLen);
+	if(Size!=nLen){
+		return 0;
+	}
+	if(readSCS(bBuf+3, 1)!=1){
+		return 0;
+	}
+	u8 calSum = bBuf[0]+bBuf[1]+bBuf[2];
+	u8 i;
+	for(i=0; i<Size; i++){
+		calSum += nData[i];
+	}
+	calSum = ~calSum;
+	if(calSum!=bBuf[3]){
+		return 0;
+	}
+	Error = bBuf[2];
+	return Size;
+}
+
+// read 1 byte from servo, return -1 when timeout
+int SCS::readByte(u8 ID, u8 MemAddr)
+{
+	u8 bDat;
+	int Size = Read(ID, MemAddr, &bDat, 1);
+	if(Size!=1){
+		return -1;
+	}else{
+		return bDat;
+	}
+}
+
+// read 2 byte from servo, return -1 when timeout
+int SCS::readWord(u8 ID, u8 MemAddr)
+{	
+	u8 nDat[2];
+	int Size;
+	u16 wDat;
+	Size = Read(ID, MemAddr, nDat, 2);
+	if(Size!=2)
+		return -1;
+	wDat = SCS2Host(nDat[0], nDat[1]);
+	return wDat;
+}
+
+// Ping command, return the ID of servo, return -1 when timeout.
+int	SCS::Ping(u8 ID)
+{
+	rFlushSCS();
+	writeBuf(ID, 0, NULL, 0, INST_PING);
+	wFlushSCS();
+	Error = 0;
+	if(!checkHead()){
+		return -1;
+	}
+	u8 bBuf[4];
+	if(readSCS(bBuf, 4)!=4){
+		return -1;
+	}
+	if(bBuf[0]!=ID && ID!=0xfe){
+		return -1;
+	}
+	if(bBuf[1]!=2){
+		return -1;
+	}
+	u8 calSum = ~(bBuf[0]+bBuf[1]+bBuf[2]);
+	if(calSum!=bBuf[3]){
+		return -1;			
+	}
+	Error = bBuf[2];
+	return bBuf[0];
+}
+
+int SCS::checkHead()
+{
+	u8 bDat;
+	u8 bBuf[2] = {0, 0};
+	u8 Cnt = 0;
+	while(1){
+		if(!readSCS(&bDat, 1)){
+			return 0;
+		}
+		bBuf[1] = bBuf[0];
+		bBuf[0] = bDat;
+		if(bBuf[0]==0xff && bBuf[1]==0xff){
+			break;
+		}
+		Cnt++;
+		if(Cnt>10){
+			return 0;
+		}
+	}
+	return 1;
+}
+
+int	SCS::Ack(u8 ID)
+{
+	Error = 0;
+	if(ID!=0xfe && Level){
+		if(!checkHead()){
+			return 0;
+		}
+		u8 bBuf[4];
+		if(readSCS(bBuf, 4)!=4){
+			return 0;
+		}
+		if(bBuf[0]!=ID){
+			return 0;
+		}
+		if(bBuf[1]!=2){
+			return 0;
+		}
+		u8 calSum = ~(bBuf[0]+bBuf[1]+bBuf[2]);
+		if(calSum!=bBuf[3]){
+			return 0;			
+		}
+		Error = bBuf[2];
+	}
+	return 1;
+}
+
+int	SCS::syncReadPacketTx(u8 ID[], u8 IDN, u8 MemAddr, u8 nLen)
+{
+	syncReadRxPacketLen = nLen;
+	u8 checkSum = (4+0xfe)+IDN+MemAddr+nLen+INST_SYNC_READ;
+	u8 i;
+	writeSCS(0xff);
+	writeSCS(0xff);
+	writeSCS(0xfe);
+	writeSCS(IDN+4);
+	writeSCS(INST_SYNC_READ);
+	writeSCS(MemAddr);
+	writeSCS(nLen);
+	for(i=0; i<IDN; i++){
+		writeSCS(ID[i]);
+		checkSum += ID[i];
+	}
+	checkSum = ~checkSum;
+	writeSCS(checkSum);
+	return nLen;
+}
+
+int SCS::syncReadPacketRx(u8 ID, u8 *nDat)
+{
+	syncReadRxPacket = nDat;
+	syncReadRxPacketIndex = 0;
+	u8 bBuf[4];
+	if(!checkHead()){
+		return 0;
+	}
+	if(readSCS(bBuf, 3)!=3){
+		return 0;
+	}
+	if(bBuf[0]!=ID){
+		return 0;
+	}
+	if(bBuf[1]!=(syncReadRxPacketLen+2)){
+		return 0;
+	}
+	Error = bBuf[2];
+	if(readSCS(nDat, syncReadRxPacketLen)!=syncReadRxPacketLen){
+		return 0;
+	}
+	return syncReadRxPacketLen;
+}
+
+int SCS::syncReadRxPacketToByte()
+{
+	if(syncReadRxPacketIndex>=syncReadRxPacketLen){
+		return -1;
+	}
+	return syncReadRxPacket[syncReadRxPacketIndex++];
+}
+
+int SCS::syncReadRxPacketToWrod(u8 negBit)
+{
+	if((syncReadRxPacketIndex+1)>=syncReadRxPacketLen){
+		return -1;
+	}
+	int Word = SCS2Host(syncReadRxPacket[syncReadRxPacketIndex], syncReadRxPacket[syncReadRxPacketIndex+1]);
+	syncReadRxPacketIndex += 2;
+	if(negBit){
+		if(Word&(1<<negBit)){
+			Word = -(Word & ~(1<<negBit));
+		}
+	}
+	return Word;
+}
+﻿/*
+ * SCS.h
+ * communication layer for waveshare serial bus servo
+ * date: 2019.12.18 
+ */
+
+#ifndef _SCS_H
+#define _SCS_H
+
+#include "INST.h"
+
+class SCS{
+public:
+	SCS();
+	SCS(u8 End);
+	SCS(u8 End, u8 Level);
+	int genWrite(u8 ID, u8 MemAddr, u8 *nDat, u8 nLen); // general write
+	int regWrite(u8 ID, u8 MemAddr, u8 *nDat, u8 nLen); // write asynchronously
+	int RegWriteAction(u8 ID = 0xfe); // trigger command for regWrite()
+	void syncWrite(u8 ID[], u8 IDN, u8 MemAddr, u8 *nDat, u8 nLen); // write synchronously
+	int writeByte(u8 ID, u8 MemAddr, u8 bDat); // write 1 byte
+	int writeWord(u8 ID, u8 MemAddr, u16 wDat); // write 2 byte
+	int Read(u8 ID, u8 MemAddr, u8 *nData, u8 nLen); // read command
+	int readByte(u8 ID, u8 MemAddr); // read 1 byte
+	int readWord(u8 ID, u8 MemAddr); // read 2 byte
+	int Ping(u8 ID); // Ping command
+	int syncReadPacketTx(u8 ID[], u8 IDN, u8 MemAddr, u8 nLen); // read synchronously command send
+	int syncReadPacketRx(u8 ID, u8 *nDat); // read synchronously command receive, return the number of byte when succeed, return 0 when failed
+	int syncReadRxPacketToByte(); // decode one byte
+	int syncReadRxPacketToWrod(u8 negBit=0); // decode 2 byte, negBit is the direction, 0 as none.
+public:
+	u8 Level; // the level of the servo return
+	u8 End; // processor endian structure
+	u8 Error; // the status of servo
+	u8 syncReadRxPacketIndex;
+	u8 syncReadRxPacketLen;
+	u8 *syncReadRxPacket;
+protected:
+	virtual int writeSCS(unsigned char *nDat, int nLen) = 0;
+	virtual int readSCS(unsigned char *nDat, int nLen) = 0;
+	virtual int writeSCS(unsigned char bDat) = 0;
+	virtual void rFlushSCS() = 0;
+	virtual void wFlushSCS() = 0;
+protected:
+	void writeBuf(u8 ID, u8 MemAddr, u8 *nDat, u8 nLen, u8 Fun);
+	void Host2SCS(u8 *DataL, u8* DataH, u16 Data); // one 16-digit number split into two 8-digit numbers
+	u16	SCS2Host(u8 DataL, u8 DataH); // combination of two 8-digit numbers into one 16-digit number
+	int	Ack(u8 ID); // return response
+	int checkHead(); // Frame header detection
+};
+#endif﻿/*
+ * SCSCL.cpp
+ * application layer for waveshare serial bus servo
+ * date: 2023.6.23 
+ */
+
+#include "SCSCL.h"
+
+SCSCL::SCSCL()
+{
+	End = 1;
+}
+
+SCSCL::SCSCL(u8 End):SCSerial(End)
+{
+}
+
+SCSCL::SCSCL(u8 End, u8 Level):SCSerial(End, Level)
+{
+}
+
+int SCSCL::WritePos(u8 ID, u16 Position, u16 Time, u16 Speed)
+{
+	u8 bBuf[6];
+	Host2SCS(bBuf+0, bBuf+1, Position);
+	Host2SCS(bBuf+2, bBuf+3, Time);
+	Host2SCS(bBuf+4, bBuf+5, Speed);
+	
+	return genWrite(ID, SCSCL_GOAL_POSITION_L, bBuf, 6);
+}
+
+int SCSCL::WritePosEx(u8 ID, s16 Position, u16 Speed, u8 ACC)
+{
+	ACC = 0;
+	u16 Time = 0;
+	u8 bBuf[6];
+	Host2SCS(bBuf+0, bBuf+1, Position);
+	Host2SCS(bBuf+2, bBuf+3, Time);
+	Host2SCS(bBuf+4, bBuf+5, Speed);
+	
+	return genWrite(ID, SCSCL_GOAL_POSITION_L, bBuf, 6);
+}
+
+int SCSCL::RegWritePos(u8 ID, u16 Position, u16 Time, u16 Speed)
+{
+	u8 bBuf[6];
+	Host2SCS(bBuf+0, bBuf+1, Position);
+	Host2SCS(bBuf+2, bBuf+3, Time);
+	Host2SCS(bBuf+4, bBuf+5, Speed);
+	
+	return regWrite(ID, SCSCL_GOAL_POSITION_L, bBuf, 6);
+}
+
+int SCSCL::CalibrationOfs(u8 ID){
+	return -1;
+}
+
+void SCSCL::SyncWritePos(u8 ID[], u8 IDN, u16 Position[], u16 Time[], u16 Speed[])
+{
+    u8 offbuf[6*IDN];
+    for(u8 i = 0; i<IDN; i++){
+		u16 T, V;
+		if(Time){
+			T = Time[i];
+		}else{
+			T = 0;
+		}
+		if(Speed){
+			V = Speed[i];
+		}else{
+			V = 0;
+		}
+        Host2SCS(offbuf+i*6+0, offbuf+i*6+1, Position[i]);
+        Host2SCS(offbuf+i*6+2, offbuf+i*6+3, T);
+        Host2SCS(offbuf+i*6+4, offbuf+i*6+5, V);
+    }
+    syncWrite(ID, IDN, SCSCL_GOAL_POSITION_L, offbuf, 6);
+}
+
+int SCSCL::PWMMode(u8 ID)
+{
+	u8 bBuf[4];
+	bBuf[0] = 0;
+	bBuf[1] = 0;
+	bBuf[2] = 0;
+	bBuf[3] = 0;
+	return genWrite(ID, SCSCL_MIN_ANGLE_LIMIT_L, bBuf, 4);	
+}
+
+int SCSCL::WritePWM(u8 ID, s16 pwmOut)
+{
+	if(pwmOut<0){
+		pwmOut = -pwmOut;
+		pwmOut |= (1<<10);
+	}
+	u8 bBuf[2];
+	Host2SCS(bBuf+0, bBuf+1, pwmOut);
+	
+	return genWrite(ID, SCSCL_GOAL_TIME_L, bBuf, 2);
+}
+
+int SCSCL::EnableTorque(u8 ID, u8 Enable)
+{
+	return writeByte(ID, SCSCL_TORQUE_ENABLE, Enable);
+}
+
+int SCSCL::unLockEprom(u8 ID)
+{
+	return writeByte(ID, SCSCL_LOCK, 0);
+}
+
+int SCSCL::LockEprom(u8 ID)
+{
+	return writeByte(ID, SCSCL_LOCK, 1);
+}
+
+int SCSCL::FeedBack(int ID)
+{
+	int nLen = Read(ID, SCSCL_PRESENT_POSITION_L, Mem, sizeof(Mem));
+	if(nLen!=sizeof(Mem)){
+		Err = 1;
+		return -1;
+	}
+	Err = 0;
+	return nLen;
+}
+	
+int SCSCL::ReadPos(int ID)
+{
+	int Pos = -1;
+	if(ID==-1){
+		Pos = Mem[SCSCL_PRESENT_POSITION_L-SCSCL_PRESENT_POSITION_L];
+		Pos <<= 8;
+		Pos |= Mem[SCSCL_PRESENT_POSITION_H-SCSCL_PRESENT_POSITION_L];
+	}else{
+		Err = 0;
+		Pos = readWord(ID, SCSCL_PRESENT_POSITION_L);
+		if(Pos==-1){
+			Err = 1;
+		}
+	}
+	return Pos;
+}
+
+int SCSCL::ReadSpeed(int ID)
+{
+	int Speed = -1;
+	if(ID==-1){
+		Speed = Mem[SCSCL_PRESENT_SPEED_L-SCSCL_PRESENT_POSITION_L];
+		Speed <<= 8;
+		Speed |= Mem[SCSCL_PRESENT_SPEED_H-SCSCL_PRESENT_POSITION_L];
+	}else{
+		Err = 0;
+		Speed = readWord(ID, SCSCL_PRESENT_SPEED_L);
+		if(Speed==-1){
+			Err = 1;
+			return -1;
+		}
+	}
+	if(!Err && (Speed&(1<<15))){
+		Speed = -(Speed&~(1<<15));
+	}	
+	return Speed;
+}
+
+int SCSCL::ReadLoad(int ID)
+{
+	int Load = -1;
+	if(ID==-1){
+		Load = Mem[SCSCL_PRESENT_LOAD_L-SCSCL_PRESENT_POSITION_L];
+		Load <<= 8;
+		Load |= Mem[SCSCL_PRESENT_LOAD_H-SCSCL_PRESENT_POSITION_L];
+	}else{
+		Err = 0;
+		Load = readWord(ID, SCSCL_PRESENT_LOAD_L);
+		if(Load==-1){
+			Err = 1;
+		}
+	}
+	if(!Err && (Load&(1<<10))){
+		Load = -(Load&~(1<<10));
+	}	
+	return Load;
+}
+
+int SCSCL::ReadVoltage(int ID)
+{
+	int Voltage = -1;
+	if(ID==-1){
+		Voltage = Mem[SCSCL_PRESENT_VOLTAGE-SCSCL_PRESENT_POSITION_L];	
+	}else{
+		Err = 0;
+		Voltage = readByte(ID, SCSCL_PRESENT_VOLTAGE);
+		if(Voltage==-1){
+			Err = 1;
+		}
+	}
+	return Voltage;
+}
+
+int SCSCL::ReadTemper(int ID)
+{
+	int Temper = -1;
+	if(ID==-1){
+		Temper = Mem[SCSCL_PRESENT_TEMPERATURE-SCSCL_PRESENT_POSITION_L];	
+	}else{
+		Err = 0;
+		Temper = readByte(ID, SCSCL_PRESENT_TEMPERATURE);
+		if(Temper==-1){
+			Err = 1;
+		}
+	}
+	return Temper;
+}
+
+int SCSCL::ReadMove(int ID)
+{
+	int Move = -1;
+	if(ID==-1){
+		Move = Mem[SCSCL_MOVING-SCSCL_PRESENT_POSITION_L];	
+	}else{
+		Err = 0;
+		Move = readByte(ID, SCSCL_MOVING);
+		if(Move==-1){
+			Err = 1;
+		}
+	}
+	return Move;
+}
+
+int SCSCL::ReadMode(int ID)
+{
+	int ValueRead = -1;
+	ValueRead = readWord(ID, SCSCL_MIN_ANGLE_LIMIT_L);
+	if(ValueRead == 0){
+		return 3;
+	}
+	else if(ValueRead > 0){
+		return 0;
+	}
+	// int Mode = -1;
+	// if(ID==-1){
+	// 	Mode = Mem[SMS_STS_MODE-SMS_STS_PRESENT_POSITION_L];	
+	// }else{
+	// 	Err = 0;
+	// 	Mode = readByte(ID, SMS_STS_MODE);
+	// 	if(Mode==-1){
+	// 		Err = 1;
+	// 	}
+	// }
+	return ValueRead;
+}
+
+int SCSCL::ReadInfoValue(int ID, int AddInput)
+{
+	int ValueRead = -1;
+	ValueRead = readWord(ID, AddInput);
+	return ValueRead;
+}
+
+int SCSCL::ReadCurrent(int ID)
+{
+	int Current = -1;
+	if(ID==-1){
+		Current = Mem[SCSCL_PRESENT_CURRENT_L-SCSCL_PRESENT_POSITION_L];
+		Current <<= 8;
+		Current |= Mem[SCSCL_PRESENT_CURRENT_H-SCSCL_PRESENT_POSITION_L];
+	}else{
+		Err = 0;
+		Current = readWord(ID, SCSCL_PRESENT_CURRENT_L);
+		if(Current==-1){
+			Err = 1;
+			return -1;
+		}
+	}
+	if(!Err && (Current&(1<<15))){
+		Current = -(Current&~(1<<15));
+	}	
+	return Current;
+}﻿/*
+ * SCSCL.h
+ * application layer for waveshare serial bus servo
+ * date: 2023.6.23 
+ */
+
+#ifndef _SCSCL_H
+#define _SCSCL_H
+
+//memory table definition
+//-------EPROM(read only)--------
+#define SCSCL_VERSION_L 3
+#define SCSCL_VERSION_H 4
+
+//-------EPROM(read & write)--------
+#define SCSCL_ID 5
+#define SCSCL_BAUD_RATE 6
+#define SCSCL_MIN_ANGLE_LIMIT_L 9
+#define SCSCL_MIN_ANGLE_LIMIT_H 10
+#define SCSCL_MAX_ANGLE_LIMIT_L 11
+#define SCSCL_MAX_ANGLE_LIMIT_H 12
+#define SCSCL_CW_DEAD 26
+#define SCSCL_CCW_DEAD 27
+
+//-------SRAM(read & write)--------
+#define SCSCL_TORQUE_ENABLE 40
+#define SCSCL_GOAL_POSITION_L 42
+#define SCSCL_GOAL_POSITION_H 43
+#define SCSCL_GOAL_TIME_L 44
+#define SCSCL_GOAL_TIME_H 45
+#define SCSCL_GOAL_SPEED_L 46
+#define SCSCL_GOAL_SPEED_H 47
+#define SCSCL_LOCK 48
+
+//-------SRAM(read & write)--------
+#define SCSCL_PRESENT_POSITION_L 56
+#define SCSCL_PRESENT_POSITION_H 57
+#define SCSCL_PRESENT_SPEED_L 58
+#define SCSCL_PRESENT_SPEED_H 59
+#define SCSCL_PRESENT_LOAD_L 60
+#define SCSCL_PRESENT_LOAD_H 61
+#define SCSCL_PRESENT_VOLTAGE 62
+#define SCSCL_PRESENT_TEMPERATURE 63
+#define SCSCL_MOVING 66
+#define SCSCL_PRESENT_CURRENT_L 69
+#define SCSCL_PRESENT_CURRENT_H 70
+
+#include "SCSerial.h"
+
+class SCSCL : public SCSerial
+{
+public:
+	SCSCL();
+	SCSCL(u8 End);
+	SCSCL(u8 End, u8 Level);
+	virtual int WritePos(u8 ID, u16 Position, u16 Time, u16 Speed);//general write for single servo
+	virtual int WritePosEx(u8 ID, s16 Position, u16 Speed, u8 ACC);//position command for single servo
+	virtual int RegWritePos(u8 ID, u16 Position, u16 Time, u16 Speed = 0);//position write asynchronously for single servo(call RegWriteAction to action)
+	virtual void SyncWritePos(u8 ID[], u8 IDN, u16 Position[], u16 Time[], u16 Speed[]);//write synchronously for multi servos
+	virtual int PWMMode(u8 ID);//output PWM mode
+	virtual int WritePWM(u8 ID, s16 pwmOut);//output PWM mode command
+	virtual int EnableTorque(u8 ID, u8 Enable);//torque ctrl command
+	virtual int unLockEprom(u8 ID);//eprom unlock
+	virtual int LockEprom(u8 ID);//eprom locked
+	virtual int FeedBack(int ID);//servo information feedback
+	virtual int ReadPos(int ID);//read position
+	virtual int ReadSpeed(int ID);//read speed
+	virtual int ReadLoad(int ID);//read motor load(0~1000, 1000 = 100% max load)
+	virtual int ReadVoltage(int ID);//read voltage
+	virtual int ReadTemper(int ID);//read temperature
+	virtual int ReadMove(int ID);//read move mode
+	virtual int ReadCurrent(int ID);//read current
+	virtual int ReadMode(int ID);//read working mode
+	virtual int CalibrationOfs(u8 ID);//set middle position(placeholder, can not be used)
+	virtual int ReadInfoValue(int ID, int AddInput);//read servo type
+private:
+	u8 Mem[SCSCL_PRESENT_CURRENT_H-SCSCL_PRESENT_POSITION_L+1];
+};
+
+#endif/*
+ * SCSerial.h
+ * hardware interface layer for waveshare serial bus servo
+ * date: 2023.6.28
+ */
+
+
+#include "SCSerial.h"
+
+SCSerial::SCSerial()
+{
+	IOTimeOut = 100;
+	pSerial = NULL;
+}
+
+SCSerial::SCSerial(u8 End):SCS(End)
+{
+	IOTimeOut = 100;
+	pSerial = NULL;
+}
+
+SCSerial::SCSerial(u8 End, u8 Level):SCS(End, Level)
+{
+	IOTimeOut = 100;
+	pSerial = NULL;
+}
+
+int SCSerial::readSCS(unsigned char *nDat, int nLen)
+{
+	int Size = 0;
+	int ComData;
+	unsigned long t_begin = millis();
+	unsigned long t_user;
+	while(1){
+		ComData = pSerial->read();
+		if(ComData!=-1){
+			if(nDat){
+				nDat[Size] = ComData;
+			}
+			Size++;
+			t_begin = millis();
+		}
+		if(Size>=nLen){
+			break;
+		}
+		t_user = millis() - t_begin;
+		if(t_user>IOTimeOut){
+			break;
+		}
+	}
+	return Size;
+}
+
+int SCSerial::writeSCS(unsigned char *nDat, int nLen)
+{
+	if(nDat==NULL){
+		return 0;
+	}
+	return pSerial->write(nDat, nLen);
+}
+
+int SCSerial::writeSCS(unsigned char bDat)
+{
+	return pSerial->write(&bDat, 1);
+}
+
+void SCSerial::rFlushSCS()
+{
+	while(pSerial->read()!=-1);
+}
+
+void SCSerial::wFlushSCS()
+{
+}/*
+ * SCServo.h
+ * interface for waveshare serial bus servo
+ * date: 2023.6.11 
+ */
+
+#ifndef _SCSERVO_H
+#define _SCSERVO_H
+
+#include "SCSCL.h"
+#include "SMS_STS.h"
+
+#endif
+﻿/*
+ * SCSerial.h
+ * hardware interface layer for waveshare serial bus servo
+ * date: 2023.6.28 
+ */
+
+#ifndef _SCSERIAL_H
+#define _SCSERIAL_H
+
+#if defined(ARDUINO) && ARDUINO >= 100
+#include "Arduino.h"
+#else
+#include "WProgram.h"
+#endif
+
+#include "SCS.h"
+
+class SCSerial : public SCS
+{
+public:
+	SCSerial();
+	SCSerial(u8 End);
+	SCSerial(u8 End, u8 Level);
+
+protected:
+	virtual int writeSCS(unsigned char *nDat, int nLen);//output nLen byte
+	virtual int readSCS(unsigned char *nDat, int nLen);//input nLen byte
+	virtual int writeSCS(unsigned char bDat);//output 1 byte
+	virtual void rFlushSCS();//
+	virtual void wFlushSCS();//
+public:
+	unsigned long int IOTimeOut;//I/O timeout
+	HardwareSerial *pSerial;//serial pointer
+	int Err;
+public:
+	virtual int getErr(){  return Err;  }
+};
+
+#endif
+﻿/*
+ * SMS_STS.cpp
+ * application layer for waveshare ST servos
+ * date: 2023.6.17 
+ */
+
+#include "SMS_STS.h"
+
+SMS_STS::SMS_STS()
+{
+	End = 0;
+}
+
+SMS_STS::SMS_STS(u8 End):SCSerial(End)
+{
+}
+
+SMS_STS::SMS_STS(u8 End, u8 Level):SCSerial(End, Level)
+{
+}
+
+int SMS_STS::WritePosEx(u8 ID, s16 Position, u16 Speed, u8 ACC)
+{
+	if(Position<0){
+		Position = -Position;
+		Position |= (1<<15);
+	}
+	u8 bBuf[7];
+	bBuf[0] = ACC;
+	Host2SCS(bBuf+1, bBuf+2, Position);
+	Host2SCS(bBuf+3, bBuf+4, 0);
+	Host2SCS(bBuf+5, bBuf+6, Speed);
+	
+	return genWrite(ID, SMS_STS_ACC, bBuf, 7);
+}
+
+int SMS_STS::RegWritePosEx(u8 ID, s16 Position, u16 Speed, u8 ACC)
+{
+	if(Position<0){
+		Position = -Position;
+		Position |= (1<<15);
+	}
+	u8 bBuf[7];
+	bBuf[0] = ACC;
+	Host2SCS(bBuf+1, bBuf+2, Position);
+	Host2SCS(bBuf+3, bBuf+4, 0);
+	Host2SCS(bBuf+5, bBuf+6, Speed);
+	
+	return regWrite(ID, SMS_STS_ACC, bBuf, 7);
+}
+
+void SMS_STS::SyncWritePosEx(u8 ID[], u8 IDN, s16 Position[], u16 Speed[], u8 ACC[])
+{
+    u8 offbuf[7*IDN];
+    for(u8 i = 0; i<IDN; i++){
+		if(Position[i]<0){
+			Position[i] = -Position[i];
+			Position[i] |= (1<<15);
+		}
+		u16 V;
+		if(Speed){
+			V = Speed[i];
+		}else{
+			V = 0;
+		}
+		if(ACC){
+			offbuf[i*7] = ACC[i];
+		}else{
+			offbuf[i*7] = 0;
+		}
+        Host2SCS(offbuf+i*7+1, offbuf+i*7+2, Position[i]);
+        Host2SCS(offbuf+i*7+3, offbuf+i*7+4, 0);
+        Host2SCS(offbuf+i*7+5, offbuf+i*7+6, V);
+    }
+    syncWrite(ID, IDN, SMS_STS_ACC, offbuf, 7);
+}
+
+int SMS_STS::WheelMode(u8 ID)
+{
+	return writeByte(ID, SMS_STS_MODE, 1);		
+}
+
+int SMS_STS::WriteSpe(u8 ID, s16 Speed, u8 ACC)
+{
+	if(Speed<0){
+		Speed = -Speed;
+		Speed |= (1<<15);
+	}
+	u8 bBuf[2];
+	bBuf[0] = ACC;
+	genWrite(ID, SMS_STS_ACC, bBuf, 1);
+	Host2SCS(bBuf+0, bBuf+1, Speed);
+	
+	return genWrite(ID, SMS_STS_GOAL_SPEED_L, bBuf, 2);
+}
+
+int SMS_STS::EnableTorque(u8 ID, u8 Enable)
+{
+	return writeByte(ID, SMS_STS_TORQUE_ENABLE, Enable);
+}
+
+int SMS_STS::unLockEprom(u8 ID)
+{
+	return writeByte(ID, SMS_STS_LOCK, 0);
+}
+
+int SMS_STS::LockEprom(u8 ID)
+{
+	return writeByte(ID, SMS_STS_LOCK, 1);
+}
+
+int SMS_STS::CalibrationOfs(u8 ID)
+{
+	return writeByte(ID, SMS_STS_TORQUE_ENABLE, 128);
+}
+
+int SMS_STS::FeedBack(int ID)
+{
+	int nLen = Read(ID, SMS_STS_PRESENT_POSITION_L, Mem, sizeof(Mem));
+	if(nLen!=sizeof(Mem)){
+		Err = 1;
+		return -1;
+	}
+	Err = 0;
+	return nLen;
+}
+
+int SMS_STS::ReadPos(int ID)
+{
+	int Pos = -1;
+	if(ID==-1){
+		Pos = Mem[SMS_STS_PRESENT_POSITION_H-SMS_STS_PRESENT_POSITION_L];
+		Pos <<= 8;
+		Pos |= Mem[SMS_STS_PRESENT_POSITION_L-SMS_STS_PRESENT_POSITION_L];
+	}else{
+		Err = 0;
+		Pos = readWord(ID, SMS_STS_PRESENT_POSITION_L);
+		if(Pos==-1){
+			Err = 1;
+		}
+	}
+	if(!Err && (Pos&(1<<15))){
+		Pos = -(Pos&~(1<<15));
+	}
+	
+	return Pos;
+}
+
+int SMS_STS::ReadSpeed(int ID)
+{
+	int Speed = -1;
+	if(ID==-1){
+		Speed = Mem[SMS_STS_PRESENT_SPEED_H-SMS_STS_PRESENT_POSITION_L];
+		Speed <<= 8;
+		Speed |= Mem[SMS_STS_PRESENT_SPEED_L-SMS_STS_PRESENT_POSITION_L];
+	}else{
+		Err = 0;
+		Speed = readWord(ID, SMS_STS_PRESENT_SPEED_L);
+		if(Speed==-1){
+			Err = 1;
+			return -1;
+		}
+	}
+	if(!Err && (Speed&(1<<15))){
+		Speed = -(Speed&~(1<<15));
+	}	
+	return Speed;
+}
+
+int SMS_STS::ReadLoad(int ID)
+{
+	int Load = -1;
+	if(ID==-1){
+		Load = Mem[SMS_STS_PRESENT_LOAD_H-SMS_STS_PRESENT_POSITION_L];
+		Load <<= 8;
+		Load |= Mem[SMS_STS_PRESENT_LOAD_L-SMS_STS_PRESENT_POSITION_L];
+	}else{
+		Err = 0;
+		Load = readWord(ID, SMS_STS_PRESENT_LOAD_L);
+		if(Load==-1){
+			Err = 1;
+		}
+	}
+	if(!Err && (Load&(1<<10))){
+		Load = -(Load&~(1<<10));
+	}
+	return Load;
+}
+
+int SMS_STS::ReadVoltage(int ID)
+{	
+	int Voltage = -1;
+	if(ID==-1){
+		Voltage = Mem[SMS_STS_PRESENT_VOLTAGE-SMS_STS_PRESENT_POSITION_L];	
+	}else{
+		Err = 0;
+		Voltage = readByte(ID, SMS_STS_PRESENT_VOLTAGE);
+		if(Voltage==-1){
+			Err = 1;
+		}
+	}
+	return Voltage;
+}
+
+int SMS_STS::ReadTemper(int ID)
+{	
+	int Temper = -1;
+	if(ID==-1){
+		Temper = Mem[SMS_STS_PRESENT_TEMPERATURE-SMS_STS_PRESENT_POSITION_L];	
+	}else{
+		Err = 0;
+		Temper = readByte(ID, SMS_STS_PRESENT_TEMPERATURE);
+		if(Temper==-1){
+			Err = 1;
+		}
+	}
+	return Temper;
+}
+
+int SMS_STS::ReadMove(int ID)
+{
+	int Move = -1;
+	if(ID==-1){
+		Move = Mem[SMS_STS_MOVING-SMS_STS_PRESENT_POSITION_L];	
+	}else{
+		Err = 0;
+		Move = readByte(ID, SMS_STS_MOVING);
+		if(Move==-1){
+			Err = 1;
+		}
+	}
+	return Move;
+}
+
+int SMS_STS::ReadMode(int ID)
+{
+	int Mode = -1;
+	if(ID==-1){
+		Mode = Mem[SMS_STS_MODE-SMS_STS_PRESENT_POSITION_L];	
+	}else{
+		Err = 0;
+		Mode = readByte(ID, SMS_STS_MODE);
+		if(Mode==-1){
+			Err = 1;
+		}
+	}
+	return Mode;
+}
+
+int SMS_STS::ReadCurrent(int ID)
+{
+	int Current = -1;
+	if(ID==-1){
+		Current = Mem[SMS_STS_PRESENT_CURRENT_H-SMS_STS_PRESENT_POSITION_L];
+		Current <<= 8;
+		Current |= Mem[SMS_STS_PRESENT_CURRENT_L-SMS_STS_PRESENT_POSITION_L];
+	}else{
+		Err = 0;
+		Current = readWord(ID, SMS_STS_PRESENT_CURRENT_L);
+		if(Current==-1){
+			Err = 1;
+			return -1;
+		}
+	}
+	if(!Err && (Current&(1<<15))){
+		Current = -(Current&~(1<<15));
+	}	
+	return Current;
+}
+﻿/*
+ * SMS_STS.h
+ * application layer for waveshare ST servos.
+ * date: 2023.6.11 
+ */
+
+#ifndef _SMS_STS_H
+#define _SMS_STS_H
+
+//memory table definition
+//-------EPROM(read only)--------
+#define SMS_STS_MODEL_L 3
+#define SMS_STS_MODEL_H 4
+
+//-------EPROM(read & write)--------
+#define SMS_STS_ID 5
+#define SMS_STS_BAUD_RATE 6
+#define SMS_STS_MIN_ANGLE_LIMIT_L 9
+#define SMS_STS_MIN_ANGLE_LIMIT_H 10
+#define SMS_STS_MAX_ANGLE_LIMIT_L 11
+#define SMS_STS_MAX_ANGLE_LIMIT_H 12
+#define SMS_STS_CW_DEAD 26
+#define SMS_STS_CCW_DEAD 27
+#define SMS_STS_OFS_L 31
+#define SMS_STS_OFS_H 32
+#define SMS_STS_MODE 33
+
+//-------SRAM(read & write)--------
+#define SMS_STS_TORQUE_ENABLE 40
+#define SMS_STS_ACC 41
+#define SMS_STS_GOAL_POSITION_L 42
+#define SMS_STS_GOAL_POSITION_H 43
+#define SMS_STS_GOAL_TIME_L 44
+#define SMS_STS_GOAL_TIME_H 45
+#define SMS_STS_GOAL_SPEED_L 46
+#define SMS_STS_GOAL_SPEED_H 47
+#define SMS_STS_TORQUE_LIMIT_L 48
+#define SMS_STS_TORQUE_LIMIT_H 49
+#define SMS_STS_LOCK 55
+
+//-------SRAM(read only)--------
+#define SMS_STS_PRESENT_POSITION_L 56
+#define SMS_STS_PRESENT_POSITION_H 57
+#define SMS_STS_PRESENT_SPEED_L 58
+#define SMS_STS_PRESENT_SPEED_H 59
+#define SMS_STS_PRESENT_LOAD_L 60
+#define SMS_STS_PRESENT_LOAD_H 61
+#define SMS_STS_PRESENT_VOLTAGE 62
+#define SMS_STS_PRESENT_TEMPERATURE 63
+#define SMS_STS_MOVING 66
+#define SMS_STS_PRESENT_CURRENT_L 69
+#define SMS_STS_PRESENT_CURRENT_H 70
+
+#include "SCSerial.h"
+
+class SMS_STS : public SCSerial
+{
+public:
+	SMS_STS();
+	SMS_STS(u8 End);
+	SMS_STS(u8 End, u8 Level);
+	virtual int WritePosEx(u8 ID, s16 Position, u16 Speed, u8 ACC = 0);//general write for single servo
+	virtual int RegWritePosEx(u8 ID, s16 Position, u16 Speed, u8 ACC = 0);//position write asynchronously for single servo(call RegWriteAction to action)
+	virtual void SyncWritePosEx(u8 ID[], u8 IDN, s16 Position[], u16 Speed[], u8 ACC[]);//write synchronously for multi servos
+	virtual int WheelMode(u8 ID);//speed loop mode
+	virtual int WriteSpe(u8 ID, s16 Speed, u8 ACC = 0);//speed loop mode ctrl command
+	virtual int EnableTorque(u8 ID, u8 Enable);//torque ctrl command
+	virtual int unLockEprom(u8 ID);//eprom unlock
+	virtual int LockEprom(u8 ID);//eprom locked
+	virtual int CalibrationOfs(u8 ID);//set middle position
+	virtual int FeedBack(int ID);//servo information feedback
+	virtual int ReadPos(int ID);//read position
+	virtual int ReadSpeed(int ID);//read speed
+	virtual int ReadLoad(int ID);//read motor load(0~1000, 1000 = 100% max load)
+	virtual int ReadVoltage(int ID);//read voltage
+	virtual int ReadTemper(int ID);//read temperature
+	virtual int ReadMove(int ID);//read move mode
+	virtual int ReadCurrent(int ID);//read current
+	virtual int ReadMode(int ID);//read working mode
+private:
+	u8 Mem[SMS_STS_PRESENT_CURRENT_H-SMS_STS_PRESENT_POSITION_L+1];
+};
+
+#endif
+
+﻿communication layer: SCS
+----------------------------
+hardware interface layer: SCSerial
+----------------------------
+application layer: SMS_STS SCSCL -> ST/SC
+
+
+
+SMS_STS sms_sts;//ST Servos
+SCSCL sc;//定义SC Servos
+
+
+
+INST.h---directive definition header file
+SCS.h/SCS.cpp---communication layer program
+SCSerial.h/SCSerial.cpp---hardware interface program
+SMS_STS.h/SMS_STS.cpp---application layer for ST Servos
+SCSCL.h/SCSCL.cpp---application layer for SC Servos
+
+
+SCS<---SCSerial<---SMS_STS/SCSCL #include <Wire.h>
+TaskHandle_t ScreenUpdateHandle;
+TaskHandle_t ClientCmdHandle;
+
+// SSD1306: 0x3C
+#include <Adafruit_SSD1306.h>
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 32 // OLED display height, in pixels, 32 as default.
+#define OLED_RESET     -1 // Reset pin # (or -1 if sharing Arduino reset pin)
+#define SCREEN_ADDRESS 0x3C ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+
+void InitScreen(){
+  if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+    Serial.println(F("SSD1306 allocation failed"));
+  }
+  display.clearDisplay();
+  display.display();
+}
+
+
+void screenUpdate(){
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0,0);
+  // Row1.
+  display.print(F("MAC:"));display.println(MAC_ADDRESS);
+  // Row2.
+  display.print(F("V:"));display.print(float(voltageRead[listID[activeNumInList]])/10);display.print(F(" "));display.println(IP_ADDRESS);
+  // Row3.
+  display.print(F("MODE:"));
+
+  if(DEV_ROLE == 1){display.print(F("L"));}
+  else if(DEV_ROLE == 2){display.print(F("F"));}
+  else if(DEV_ROLE == 0){display.print(F("N"));}
+
+  if(WIFI_MODE == 1){display.print(F(" AP "));display.println(AP_SSID);}
+  else if(WIFI_MODE == 2){display.print(F(" STA "));display.print(F("RSSI"));display.println(WIFI_RSSI);}
+  else if(WIFI_MODE == 3){display.print(F(" TRY:"));display.print(STA_SSID);display.println(F(""));}
+
+  // Row4.
+  if(searchNum){
+    display.print(F("N:"));display.print(searchNum);display.print(F(" ID:"));display.print(listID[activeNumInList]);
+    display.print(F("M"));display.print(modeRead[listID[activeNumInList]]);display.print(F("T"));display.print(ServoType[listID[activeNumInList]]);
+    display.print(F(" P"));display.println(posRead[listID[activeNumInList]]);
+  }
+  else{
+    display.println(F("No servo detected."));
+  }
+  display.display();
+}
+
+
+void pingAll(bool searchCommand){
+  if(searchCommand){
+    RGBcolor(0, 255, 64);
+    searchNum = 0;
+    searchedStatus = true;
+    searchFinished = false;
+
+    int PingStatus;
+    for(int i = 0; i <= MAX_ID; i++){
+      PingStatus = st.Ping(i);
+
+      display.clearDisplay();
+      display.setTextSize(1);
+      display.setTextColor(SSD1306_WHITE);
+      display.setCursor(0,0);
+      display.println(F("Searching Servos..."));
+      display.print(F("MAX_ID "));display.print(MAX_ID);
+      display.print(F("-Ping:"));display.println(i);
+      display.print(F("Detected:"));
+
+      for(int i = 0; i < searchNum; i++){
+        display.print(listID[i]);display.print(F(" "));
+      }
+      display.display();
+
+      if(PingStatus!=-1){
+        listID[searchNum] = i;
+        ServoType[i] = st.readByte(i, 3);
+        Serial.print("----------->");Serial.print(i);Serial.print("<-----------");Serial.println("");
+        Serial.print("----------->");Serial.print(ServoType[i]);Serial.print("<-----------");Serial.println("");
+        searchNum++;
+      }
+      // delay(1);
+    }
+
+    Serial.println("ID:");
+    for(int i = 0; i< searchNum; i++){
+      Serial.print(listID[i]);Serial.print(" ");
+      Serial.println("");
+    }
+
+    Serial.println("Type:");
+    for(int i = 0; i< searchNum; i++){
+      Serial.print(ServoType[i]);Serial.print(" ");
+      Serial.println("");
+    }
+
+    searchedStatus = false;
+    searchFinished = true;
+    searchCmd      = false;
+    RGBoff();
+  }
+}
+
+
+void boardDevInit(){
+    Wire.begin(S_SDA, S_SCL);
+    InitScreen();
+    InitRGB();
+}
+
+
+void espNowSendData(){
+  // Set values to send
+  myData.ID_send = listID[activeNumInList];
+  myData.POS_send = posRead[listID[activeNumInList]];
+  myData.Spd_send = speedRead[listID[activeNumInList]];
+  
+  // Send message via ESP-NOW
+  esp_err_t result = esp_now_send(broadcastAddress, (uint8_t *) &myData, sizeof(myData));
+   
+  if (result == ESP_OK) {
+    Serial.println("Sent with success");
+  }
+  else {
+    Serial.println("Error sending the data");
+  }
+  delay(200);
+}
+
+
+void InfoUpdateThreading(void *pvParameter){
+  while(1){
+    if(!SERIAL_FORWARDING && !RAINBOW_STATUS){
+      getFeedBack(listID[activeNumInList]);
+      getWifiStatus();
+      screenUpdate();
+      delay(threadingInterval);
+      pingAll(searchCmd);
+    }
+    else if(SERIAL_FORWARDING){
+      display.clearDisplay();
+      display.setTextSize(1);
+      display.setTextColor(SSD1306_WHITE);
+      display.setCursor(0,0);
+      display.println(F(" - - - - - - - -"));
+      display.println(F("SERIAL_FORWARDING"));
+      display.println(F(" - - - - - - - -"));
+      display.display();
+      delay(1000);
+    }
+    else if(RAINBOW_STATUS){
+      display.clearDisplay();
+      display.setTextSize(3);
+      display.setTextColor(SSD1306_WHITE);
+      display.setCursor(0,0);
+      display.println(F("RAINBOW"));
+      display.display();
+      rainbow(30);
+    }
+  }
+}
+
+
+void workingModeSelect(){
+  if(SERIAL_FORWARDING){
+    while(SERIAL_FORWARDING){
+      server.handleClient();
+      if (Serial.available()){
+        usbRead = Serial.read();
+        Serial1.write(usbRead);
+      }
+      if (Serial1.available()){
+        stsRead = Serial1.read();
+        Serial.write(stsRead);
+      }
+    }
+  }
+}
+
+
+void clientThreading(void *pvParameter){
+  while(1){
+    server.handleClient();
+    workingModeSelect();
+    if(!DEV_ROLE){
+      delay(clientInterval);
+    }
+    if(DEV_ROLE == 1){
+      espNowSendData();
+    }
+  }
+}
+
+
+void threadInit(){
+  xTaskCreatePinnedToCore(&InfoUpdateThreading, "InfoUpdate", 4000, NULL, 5, &ScreenUpdateHandle, ARDUINO_RUNNING_CORE);
+  xTaskCreate(&clientThreading, "Client", 4000, NULL, 5, &ClientCmdHandle);
+}// https://randomnerdtutorials.com/esp32-useful-wi-fi-functions-arduino/
+#include <esp_now.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include "WEBPAGE.h"
+
+
+// Create AsyncWebServer object on port 80
+WebServer server(80);
+
+
+// select the ID of active servo.
+void activeID(int cmdInput){
+  activeNumInList += cmdInput;
+  if(activeNumInList >= searchNum){
+    activeNumInList = 0;
+  }
+  else if(activeNumInList < 0){
+    activeNumInList = searchNum;
+  }
+}
+
+
+void activeSpeed(int cmdInput){
+  activeServoSpeed += cmdInput;
+  if(ServoType[listID[activeNumInList]] == 9){
+    if (activeServoSpeed > ServoMaxSpeed_ST){
+      activeServoSpeed = ServoMaxSpeed_ST;
+    }
+    else if(activeServoSpeed < 0){
+      activeServoSpeed = 0;
+    }
+  }
+  else if(ServoType[listID[activeNumInList]] == 5){
+    if (activeServoSpeed > ServoMaxSpeed_SC){
+      activeServoSpeed = ServoMaxSpeed_SC;
+    }
+    else if(activeServoSpeed < 0){
+      activeServoSpeed = 0;
+    }
+  }
+}
+
+
+int rangeCtrl(int rawInput, int minInput, int maxInput){
+  if(rawInput > maxInput){
+    return maxInput;
+  }
+  else if(rawInput < minInput){
+    return minInput;
+  }
+  else{
+    return rawInput;
+  }
+}
+
+
+void activeCtrl(int cmdInput){
+  Serial.println("---   ---   ---");
+  Serial.println(activeNumInList);
+  Serial.println(listID[activeNumInList]);
+  Serial.println(ServoType[listID[activeNumInList]]);
+  Serial.println(ServoType[1]);
+  Serial.println("---   ---   ---");
+  switch(cmdInput){
+    case 1:
+      if(ServoType[listID[activeNumInList]] == 9){
+        st.WritePosEx(listID[activeNumInList], ServoDigitalMiddle_ST, activeServoSpeed, ServoInitACC_ST);break;
+      }
+      else if(ServoType[listID[activeNumInList]] == 5){
+        sc.WritePos(listID[activeNumInList], ServoDigitalMiddle_SC, 0, activeServoSpeed);break;
+      }
+
+
+    case 2:
+      servoStop(listID[activeNumInList]);
+      break;
+
+
+    case 3:servoTorque(listID[activeNumInList],0);Torque_List[activeNumInList] = false;break;
+
+
+    case 4:servoTorque(listID[activeNumInList],1);Torque_List[activeNumInList] = true;break;
+
+
+    case 5:
+      if(modeRead[listID[activeNumInList]] == 0){
+        if(ServoType[listID[activeNumInList]] == 9){
+          st.WritePosEx(listID[activeNumInList], ServoDigitalRange_ST - 1, activeServoSpeed, ServoInitACC_ST);
+        }
+        else if(ServoType[listID[activeNumInList]] == 5){
+          sc.WritePosEx(listID[activeNumInList], ServoDigitalRange_SC - MAX_MIN_OFFSET, activeServoSpeed, ServoInitACC_SC);
+        }
+      }
+
+      else if(modeRead[listID[activeNumInList]] == 3){
+        if(ServoType[listID[activeNumInList]] == 9){
+          st.WritePosEx(listID[activeNumInList], 30000, activeServoSpeed, ServoInitACC_ST);
+        }
+        else if(ServoType[listID[activeNumInList]] == 5){
+          sc.WritePos(listID[activeNumInList], 30000, 0, activeServoSpeed);
+        }
+      }
+      break;
+
+
+    case 6:
+      if(modeRead[listID[activeNumInList]] == 0){
+        if(ServoType[listID[activeNumInList]] == 9){
+          st.WritePosEx(listID[activeNumInList], 0, activeServoSpeed, ServoInitACC_ST);
+        }
+        else if(ServoType[listID[activeNumInList]] == 5){
+          sc.WritePos(listID[activeNumInList], MAX_MIN_OFFSET, 0, activeServoSpeed);
+        }
+      }
+      else if(modeRead[listID[activeNumInList]] == 3){
+        if(ServoType[listID[activeNumInList]] == 9){
+          st.WritePosEx(listID[activeNumInList], -30000, activeServoSpeed, ServoInitACC_ST);
+        }
+        else if(ServoType[listID[activeNumInList]] == 5){
+          sc.WritePos(listID[activeNumInList], -30000, 0, activeServoSpeed);
+        }
+      }
+      break;
+
+
+    case 7:activeSpeed(100);break;
+    case 8:activeSpeed(-100);break;
+    case 9:servotoSet += 1;if(servotoSet > 250){servotoSet = 0;}break;
+    case 10:servotoSet -= 1;if(servotoSet < 0){servotoSet = 0;}break;
+    case 11:setMiddle(listID[activeNumInList]);break;
+    case 12:setMode(listID[activeNumInList], 0);break;
+    case 13:setMode(listID[activeNumInList], 3);break;
+    case 14:SERIAL_FORWARDING = true;break;
+    case 15:SERIAL_FORWARDING = false;break;
+    case 16:setID(listID[activeNumInList], servotoSet);break;
+
+    case 17:DEV_ROLE = 0;break;
+    case 18:DEV_ROLE = 1;break;
+    case 19:DEV_ROLE = 2;break;
+
+    case 20:RAINBOW_STATUS = 1;break;
+    case 21:RAINBOW_STATUS = 0;break;
+  }
+}
+
+
+void handleRoot() {
+ server.send(200, "text/html", index_html); //Send web page
+}
+
+
+void handleID() {
+  if(!searchedStatus && searchFinished){
+    String IDmessage = "ID:";
+    for(int i = 0; i< searchNum; i++){
+      IDmessage += String(listID[i]) + " ";
+    }
+    server.send(200, "text/plane", IDmessage);
+  }
+  else if(searchedStatus){
+    String IDmessage = "Searching...";
+    server.send(200, "text/plane", IDmessage);
+  }
+}
+
+
+void handleSTS() {
+  String stsValue = "Active ID:" + String(listID[activeNumInList]);
+  if(voltageRead[listID[activeNumInList]] != -1){
+    stsValue += "  Position:" + String(posRead[listID[activeNumInList]]);
+    if(DEV_ROLE == 0){
+      stsValue += "<p>Device Mode: Normal";
+    }
+    else if(DEV_ROLE == 1){
+      stsValue += "<p>Device Mode: Leader";
+    }
+    else if(DEV_ROLE == 2){
+      stsValue += "<p>Device Mode: Follower";
+    }
+    stsValue += "<p>Voltage:" + String(float(voltageRead[listID[activeNumInList]])/10);
+    stsValue += "  Load:" + String(loadRead[listID[activeNumInList]]);
+    stsValue += "<p>Speed:" + String(speedRead[listID[activeNumInList]]);
+
+    stsValue += "  Temper:" + String(temperRead[listID[activeNumInList]]);
+    stsValue += "<p>Speed Set:" + String(activeServoSpeed);
+    stsValue += "<p>ID to Set:" + String(servotoSet);
+    stsValue += "<p>Mode:";
+    if(modeRead[listID[activeNumInList]] == 0){
+      stsValue += "Servo Mode";
+    }
+    else if(modeRead[listID[activeNumInList]] == 3){
+      stsValue += "Motor Mode";
+    }
+
+    if(Torque_List[activeNumInList]){
+      stsValue += "<p>Torque On";
+    }
+    else{
+      stsValue += "<p>Torque Off";
+    }
+  }
+  else{
+    stsValue += " FeedBack err";
+  }
+  server.send(200, "text/plane", stsValue); //Send ADC value only to client ajax request
+}
+
+
+void webCtrlServer(){
+    server.on("/", handleRoot);
+    server.on("/readID", handleID);
+    server.on("/readSTS", handleSTS);
+
+    server.on("/cmd", [](){
+    int cmdT = server.arg(0).toInt();
+    int cmdI = server.arg(1).toInt();
+    int cmdA = server.arg(2).toInt();
+    int cmdB = server.arg(3).toInt();
+
+    switch(cmdT){
+      case 0:activeID(cmdI);break;
+      case 1:activeCtrl(cmdI);break;
+      case 9:searchCmd = true;break;
+    }
+  });
+
+  // Start server
+  server.begin();
+  Serial.println("Server Starts.");
+}
+
+
+void webServerSetup(){
+  webCtrlServer();
+}
+
+
+void getMAC(){
+  WiFi.mode(WIFI_AP_STA);
+  MAC_ADDRESS = WiFi.macAddress();
+  Serial.print("MAC:");
+  Serial.println(WiFi.macAddress());
+}
+
+
+void getIP(){
+  IP_ADDRESS = WiFi.localIP();
+}
+
+
+void setAP(){
+  WiFi.softAP(AP_SSID, AP_PWD);
+  IPAddress myIP = WiFi.softAPIP();
+  IP_ADDRESS = myIP;
+  Serial.print("AP IP address: ");
+  Serial.println(myIP);
+  WIFI_MODE = 1;
+}
+
+
+void setSTA(){
+  WIFI_MODE = 3;
+  WiFi.begin(STA_SSID, STA_PWD);
+}
+
+
+void getWifiStatus(){
+  if(WiFi.status() == WL_CONNECTED){
+    WIFI_MODE = 2;
+    getIP();
+    WIFI_RSSI = WiFi.RSSI();
+  }
+  else if(WiFi.status() == WL_CONNECTION_LOST && DEFAULT_WIFI_MODE == 2){
+    WIFI_MODE = 3;
+    // WiFi.disconnect();
+    WiFi.reconnect();
+  }
+}
+
+
+void wifiInit(){
+  DEV_ROLE  = DEFAULT_ROLE;
+  WIFI_MODE = DEFAULT_WIFI_MODE;
+  if(WIFI_MODE == 1){setAP();}
+  else if(WIFI_MODE == 2){setSTA();}
+}
+
+
+void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  Serial.print("\r\nLast Packet Send Status:\t");
+  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
+}
+
+
+void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
+  if(DEV_ROLE == 2){
+    memcpy(&myData, incomingData, sizeof(myData));
+    myData.Spd_send = abs(myData.Spd_send);
+    if(myData.Spd_send < 50){
+      myData.Spd_send = 200;
+    }
+    st.WritePosEx(myData.ID_send, myData.POS_send, abs(myData.Spd_send), 0);
+
+    Serial.print("Bytes received: ");
+    Serial.println(len);
+    Serial.print("POS: ");
+    Serial.println(myData.POS_send);
+    Serial.print("SPEED: ");
+    Serial.println(abs(myData.Spd_send));
+  }
+}
+
+
+void espNowInit(){
+  // Set device as a Wi-Fi Station
+  WiFi.mode(WIFI_STA);
+
+  // Init ESP-NOW
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Error initializing ESP-NOW");
+    return;
+  }
+
+  // Once ESPNow is successfully Init, we will register for Send CB to
+  // get the status of Trasnmitted packet
+  esp_now_register_send_cb(OnDataSent);
+  esp_now_register_recv_cb(OnDataRecv);
+
+  // Register peer
+  esp_now_peer_info_t peerInfo;
+  memcpy(peerInfo.peer_addr, broadcastAddress, 6);
+  peerInfo.channel = 0;  
+  peerInfo.encrypt = false;
+  
+  // Add peer        
+  if (esp_now_add_peer(&peerInfo) != ESP_OK){
+    Serial.println("Failed to add peer");
+    return;
+  }
+
+  MAC_ADDRESS = WiFi.macAddress();
+  Serial.print("MAC:");
+  Serial.println(WiFi.macAddress());
+}// #include <Preferences.h>
+
+// Preferences preferences;
+
+
+// void preferencesSetup(){
+//   preferences.begin("Tasks", false);
+// }
+// WS2812:
+#include <Adafruit_NeoPixel.h>
+#define BRIGHTNESS  3
+
+int RAINBOW_STATUS = 0;
+
+Adafruit_NeoPixel matrix = Adafruit_NeoPixel(NUMPIXELS, RGB_LED, NEO_GRB + NEO_KHZ800);
+
+void InitRGB(){
+  matrix.setBrightness(BRIGHTNESS);
+  matrix.begin();
+  matrix.show();
+}
+
+void colorWipe(uint32_t c, uint8_t wait) 
+{
+  for(uint16_t i=0; i<matrix.numPixels(); i++) {
+    matrix.setPixelColor(i, c);
+    matrix.show();
+    delay(wait);
+  }
+}
+
+
+void RGBALLoff(){
+  colorWipe(matrix.Color(0, 0, 0), 0);
+}
+
+
+void setSingleLED(uint16_t LEDnum, uint32_t c)
+{
+  matrix.setPixelColor(LEDnum, c);
+  matrix.show();
+}
+
+void RGBoff(){
+  setSingleLED(0, matrix.Color(0, 0, 0));
+  setSingleLED(1, matrix.Color(0, 0, 0));
+}
+
+void RGBcolor(byte Rinput, byte Ginput, byte Binput){
+  setSingleLED(0, matrix.Color(Rinput, Ginput, Binput));
+  setSingleLED(1, matrix.Color(Rinput, Ginput, Binput));
+}
+
+
+void ctrlAllLED(int totalNum, int inputR, int inputG, int inputB){
+  for(int i = 0; i<totalNum; i++){
+    setSingleLED(i, matrix.Color(inputR, inputG, inputB));
+    delay(1);
+  }
+}
+
+
+// Input a value 0 to 255 to get a color value.
+// The colours are a transition r - g - b - back to r.
+uint32_t Wheel(byte WheelPos) {
+  if(WheelPos < 85) {
+    return matrix.Color(WheelPos * 3, 255 - WheelPos * 3, 0);
+  } 
+  else if(WheelPos < 170) {
+    WheelPos -= 85;
+    return matrix.Color(255 - WheelPos * 3, 0, WheelPos * 3);
+  } 
+  else {
+    WheelPos -= 170;
+    return matrix.Color(0, WheelPos * 3, 255 - WheelPos * 3);
+  }
+}
+
+
+void rainbow(uint8_t wait) {
+  uint16_t i, j;
+  for(j=0; j<256; j++) {
+    for(i=0; i<matrix.numPixels(); i++) {
+      matrix.setPixelColor(i, Wheel((i*1+j) & 255));
+    }
+    matrix.show();
+    if(!RAINBOW_STATUS){RGBALLoff();break;}
+    delay(wait);
+  }
+}#include <SCServo.h>
+#include <math.h>
+
+
+// === SC Servo === TypeNum:5
+SCSCL sc;
+float ServoDigitalRange_SC  = 1023.0;
+float ServoAngleRange_SC    = 210.0;
+float ServoDigitalMiddle_SC = 511.0;
+#define ServoInitACC_SC      0
+#define ServoMaxSpeed_SC     1500
+#define MaxSpeed_X_SC        1500
+#define ServoInitSpeed_SC    800
+int MAX_MIN_OFFSET = 30;
+
+
+// === ST Servo === TypeNum:9
+SMS_STS st;
+float ServoDigitalRange_ST  = 4095.0;
+float ServoAngleRange_ST    = 360.0;
+float ServoDigitalMiddle_ST = 2047.0;
+#define ServoInitACC_ST      100
+#define ServoMaxSpeed_ST     4000
+#define MaxSpeed_X_ST        4000
+#define ServoInitSpeed_ST    2000
+
+
+// set serial feedback.
+bool serialFeedback = true;
+
+// set the servo ID list.
+byte ID_List[253];
+bool Torque_List[253];
+int  ServoType[253];
+
+// []: the ID of the servo.
+// the buffer of the information read from the active servo.
+s16  loadRead[253];
+s16  speedRead[253];
+byte voltageRead[253];
+int  currentRead[253];
+s16  posRead[253];
+s16  modeRead[253];
+s16  temperRead[253];
+
+// []: the num of the active servo.
+// use listID[activeNumInList] to get the ID of the active servo.
+byte listID[253];
+byte searchNum = 0;
+bool searchedStatus = false;
+bool searchFinished = false;
+bool searchCmd      = false;
+byte activeNumInList = 0;
+s16 activeServoSpeed = 100;
+byte servotoSet = 0;
+
+// linkageBuffer to save the angle.
+float linkageBuffer[50];
+
+// the buffer of the bytes read from USB-C and servos. 
+int usbRead;
+int stsRead;
+
+
+void getFeedBack(byte servoID){
+  if(ServoType[servoID]==9){
+    if(st.FeedBack(servoID)!=-1){
+      posRead[servoID] = st.ReadPos(-1);
+      speedRead[servoID] = st.ReadSpeed(-1);
+      loadRead[servoID] = st.ReadLoad(-1);
+      voltageRead[servoID] = st.ReadVoltage(-1);
+      currentRead[servoID] = st.ReadCurrent(-1);
+      temperRead[servoID] = st.ReadTemper(-1);
+      modeRead[servoID] = st.ReadMode(servoID);
+    }else{
+      if(serialFeedback){Serial.println("FeedBack err");}
+    }
+  }
+
+}
+
+
+void servoInit(){
+  Serial1.begin(1000000, SERIAL_8N1, S_RXD, S_TXD);
+  sc.pSerial = &Serial1;
+  st.pSerial = &Serial1;
+  while(!Serial1) {}
+
+  for (int i = 0; i < MAX_ID; i++){
+    Torque_List[i] = true;
+    ServoType[i]   = -1;
+  }
+}
+
+
+void setMiddle(byte InputID){
+  if(ServoType[InputID]==9){
+    st.CalibrationOfs(InputID);
+  }
+}
+
+
+void setMode(byte InputID, byte InputMode){
+  if(InputMode == 0){
+    if(ServoType[InputID] == 9){
+      st.unLockEprom(InputID);
+      st.writeWord(InputID, 11, 4095);
+      st.writeByte(InputID, SMS_STS_MODE, InputMode);
+      st.LockEprom(InputID);
+    }
+    else if(ServoType[InputID] == 5){
+      sc.unLockEprom(InputID);
+      sc.writeWord(InputID, SCSCL_MIN_ANGLE_LIMIT_L, 20);
+      sc.writeWord(InputID, SCSCL_MAX_ANGLE_LIMIT_L, 1003);
+      sc.LockEprom(InputID);
+    }
+  }
+
+  else if(InputMode == 3){
+    if(ServoType[InputID] == 9){
+      st.unLockEprom(InputID);
+      st.writeByte(InputID, SMS_STS_MODE, InputMode);
+      st.writeWord(InputID, 11, 0);
+      st.LockEprom(InputID);
+    }
+    else if(ServoType[InputID] == 5){
+      sc.unLockEprom(InputID);
+      sc.writeWord(InputID, SCSCL_MIN_ANGLE_LIMIT_L, 0);
+      sc.writeWord(InputID, SCSCL_MAX_ANGLE_LIMIT_L, 0);
+      sc.LockEprom(InputID);
+    }
+  }
+}
+
+
+void setID(byte ID_select, byte ID_set){
+  if(ID_set > MAX_ID){MAX_ID = ID_set;}
+
+  if(ServoType[ID_select] == 9){
+    st.unLockEprom(ID_select);
+    st.writeByte(ID_select, SMS_STS_ID, ID_set);
+    st.LockEprom(ID_set);
+  }
+  else if(ServoType[ID_select] == 5){
+    sc.unLockEprom(ID_select);
+    sc.writeByte(ID_select, SCSCL_ID, ID_set);
+    sc.LockEprom(ID_set);
+  }
+}
+
+
+void servoStop(byte servoID){
+  if(ServoType[servoID] == 9){
+    st.EnableTorque(servoID, 0);
+    delay(10);
+    st.EnableTorque(servoID, 1);
+  }
+  else if(ServoType[servoID] == 5){
+    sc.EnableTorque(servoID, 0);
+    delay(10);
+    sc.EnableTorque(servoID, 1);
+  }
+  
+}
+
+
+void servoTorque(byte servoID, u8 enableCMD){
+  if(ServoType[servoID] == 9){
+    st.EnableTorque(servoID, enableCMD);
+  }
+  else if(ServoType[servoID] == 5){
+    sc.EnableTorque(servoID, enableCMD);
+  }
+}const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE HTML>
+<html>
+
+<head>
+    <title>Servo Driver with ESP32</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="icon" href="data:,">
+    <style>
+        html {
+        font-family: Arial;
+        display: inline-block;
+        background: #000000;
+        color: #efefef;
+        text-align: center;
+    }
+
+    h2 {
+        font-size: 3.0rem;
+    }
+
+    p {
+        font-size: 1.0rem;
+    }
+
+    body {
+        max-width: 600px;
+        margin: 0px auto;
+        padding-bottom: 25px;
+    }
+
+    button {
+        display: inline-block;
+        margin: 5px;
+        padding: 10px 10px;
+        border: 0;
+        line-height: 21px;
+        cursor: pointer;
+        color: #fff;
+        background: #4247b7;
+        border-radius: 5px;
+        font-size: 21px;
+        outline: 0;
+        width: 100px
+
+        -webkit-touch-callout: none;
+        -webkit-user-select: none;
+        -khtml-user-select: none;
+        -moz-user-select: none;
+        -ms-user-select: none;
+
+        user-select: none;
+    }
+
+    button:hover {
+        background: #ff494d
+    }
+
+    button:active {
+        background: #f21c21
+    }
+
+    </style>
+</head>
+
+<body>
+    <h3>SERVO DRIVER with ESP32</h3>
+    <p>
+    <span id="IDValue">Click this button to start searching servos.</span>
+    <p>
+    <label align="center"><button class="button" onclick="toggleCheckbox(9, 0, 0, 0);">Start Searching</button></label>
+    <p>
+    <span id="STSValue">Single servo infomation.</span>
+    <p>
+        <label align="center"><button class="button" onclick="toggleCheckbox(0, 1, 0, 0);">ID Select+</button></label>
+        <label align="center"><button class="button" onclick="toggleCheckbox(0, -1, 0, 0);">ID Select-</button></label>
+    <p>
+        <label align="center"><button class="button" onclick="toggleCheckbox(1, 1, 0, 0);">Middle</button></label>
+        <label align="center"><button class="button" onclick="toggleCheckbox(1, 2, 0, 0);">Stop</button></label>
+        <label align="center"><button class="button" onclick="toggleCheckbox(1, 3, 0, 0);">Release</button></label>
+        <label align="center"><button class="button" onclick="toggleCheckbox(1, 4, 0, 0);">Torque</button></label>
+    <p>
+        <label align="center"><button class="button" onmousedown="toggleCheckbox(1, 5, 0, 0);" ontouchstart="toggleCheckbox(1, 5, 0, 0);" onmouseup="toggleCheckbox(1, 2, 0, 0);" ontouchend="toggleCheckbox(1, 2, 0, 0);">Position+</button></label>
+        <label align="center"><button class="button" onmousedown="toggleCheckbox(1, 6, 0, 0);" ontouchstart="toggleCheckbox(1, 6, 0, 0);" onmouseup="toggleCheckbox(1, 2, 0, 0);" ontouchend="toggleCheckbox(1, 2, 0, 0);">Position-</button></label>
+    <p>
+        <label align="center"><button class="button" onclick="toggleCheckbox(1, 7, 0, 0);">Speed+</button></label>
+        <label align="center"><button class="button" onclick="toggleCheckbox(1, 8, 0, 0);">Speed-</button></label>
+    <p>
+        <label align="center"><button class="button" onclick="toggleCheckbox(1, 9, 0, 0);">ID to Set+</button></label>
+        <label align="center"><button class="button" onclick="toggleCheckbox(1, 10, 0, 0);">ID to Set-</button></label>
+    <p>
+        <label align="center"><button class="button" onclick="setMiddle();">Set Middle Position</button></label>
+        <label align="center"><button class="button" onclick="setNewID();">Set New ID</button></label>
+    <p>
+        <label align="center"><button class="button" onclick="setServoMode();">Set Servo Mode</button></label>
+        <label align="center"><button class="button" onclick="setStepperMode();">Set Motor Mode</button></label>
+    <p>
+        <label align="center"><button class="button" id="serialForwarding" onclick="serialForwarding();">Start Serial Forwarding</button></label>
+    <p>
+        <label align="center"><button class="button" onclick="setRole(0);">Normal</button></label>
+        <label align="center"><button class="button" onclick="setRole(1);">Leader</button></label>
+        <label align="center"><button class="button" onclick="setRole(2);">Follower</button></label>
+    <p>
+        <label align="center"><button class="button" onclick="toggleCheckbox(1, 20, 0, 0);">RainbowON</button></label>
+        <label align="center"><button class="button" onclick="toggleCheckbox(1, 21, 0, 0);">RainbowOFF</button></label>
+    <script>
+        serialForwardStatus = false;
+
+        function toggleCheckbox(inputT, inputI, inputA, inputB) {
+            var xhr = new XMLHttpRequest();
+            xhr.open("GET", "cmd?inputT="+inputT+"&inputI="+inputI+"&inputA="+inputA+"&inputB="+inputB, true);
+            xhr.send();
+        }
+
+        function ctrlMode() {
+            xhr.open("GET", "ctrl", true);
+            xhr.send();
+        }
+
+        setInterval(function() {
+          getData();
+        }, 300);
+
+        setInterval(function() {
+          getServoID();
+        }, 1500);
+
+        function getData() {
+            var xhttp = new XMLHttpRequest();
+            xhttp.onreadystatechange = function() {
+                if (this.readyState == 4 && this.status == 200) {
+                  document.getElementById("STSValue").innerHTML =
+                  this.responseText;
+                }
+            };
+            xhttp.open("GET", "readSTS", true);
+            xhttp.send();
+        }
+
+        function getServoID() {
+            var xhttp = new XMLHttpRequest();
+            xhttp.onreadystatechange = function() {
+                if (this.readyState == 4 && this.status == 200) {
+                  document.getElementById("IDValue").innerHTML =
+                  this.responseText;
+                }
+            };
+            xhttp.open("GET", "readID", true);
+            xhttp.send();
+        }
+
+        function setRole(modeNum){
+            if(modeNum == 0){
+                var r=confirm("Set the role as Normal. Dev won't send or receive data via ESP-NOW.");
+                if(r==true){
+                    toggleCheckbox(1, 17, 0, 0);
+                }
+            }
+            if(modeNum == 1){
+                var r=confirm("Set the role as Leader. Dev will send data via ESP-NOW.");
+                if(r==true){
+                    toggleCheckbox(1, 18, 0, 0);
+                }
+            }
+            if(modeNum == 2){
+                var r=confirm("Set the role as Follower. Dev will receive data via ESP-NOW.");
+                if(r==true){
+                    toggleCheckbox(1, 19, 0, 0);
+                }
+            }
+        }
+
+        function setMiddle(){
+            var r=confirm("The middle position of the active servo will be set.");
+            if(r==true){
+                toggleCheckbox(1, 11, 0, 0);
+            }
+        }
+
+        function setServoMode(){
+            var r=confirm("The active servo will be set as servoMode.");
+            if(r==true){
+                toggleCheckbox(1, 12, 0, 0);
+            }
+        }
+
+        function setStepperMode(){
+            var r=confirm("The active servo will be set as motorMode.");
+            if(r==true){
+                toggleCheckbox(1, 13, 0, 0);
+            }
+        }
+
+        function setNewID(){
+            var r=confirm("A new ID of the active servo will be set.");
+            if(r==true){
+                toggleCheckbox(1, 16, 0, 0);
+            }
+        }
+
+        function serialForwarding(){
+            if(!serialForwardStatus){
+                var r=confirm("Do you want to start serial forwarding?");
+                if(r){
+                    toggleCheckbox(1, 14, 0, 0);
+                    serialForwardStatus = true;
+                    document.getElementById("serialForwarding").innerHTML = "Stop Serial Forwarding";
+                }
+            }
+            else{
+                var r=confirm("Do you want to stop serial forwarding?");
+                if(r){
+                    toggleCheckbox(1, 15, 0, 0);
+                    serialForwardStatus = false;
+                    document.getElementById("serialForwarding").innerHTML = "Start Serial Forwarding";
+                }
+            }
+        }
+
+    </script>
+</body>
+</html>
+)rawliteral";
+
+
+working version 1 
+#include <SCServo.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE HTML>
+<html>
+<head>
+    <title>OttoNinja Control</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="icon" href="data:,">
+    <style>
+        html {
+            font-family: Arial;
+            display: inline-block;
+            background: #000000;
+            color: #efefef;
+            text-align: center;
+        }
+        h2 {
+            font-size: 3.0rem;
+        }
+        p {
+            font-size: 1.0rem;
+        }
+        body {
+            max-width: 600px;
+            margin: 0px auto;
+            padding-bottom: 25px;
+        }
+        button {
+            display: inline-block;
+            margin: 5px;
+            padding: 10px 10px;
+            border: 0;
+            line-height: 21px;
+            cursor: pointer;
+            color: #fff;
+            background: #4247b7;
+            border-radius: 5px;
+            font-size: 21px;
+            outline: 0;
+            width: 150px;
+            -webkit-touch-callout: none;
+            -webkit-user-select: none;
+            -khtml-user-select: none;
+            -moz-user-select: none;
+            -ms-user-select: none;
+            user-select: none;
+        }
+        button:hover {
+            background: #ff494d
+        }
+        button:active {
+            background: #f21c21
+        }
+    </style>
+</head>
+<body>
+    <h3>OttoNinja Control Panel</h3>
+    <p>
+    <label align="center"><button class="button" onclick="sendCommand('forward');">Forward</button></label>
+    <label align="center"><button class="button" onclick="sendCommand('backward');">Backward</button></label>
+    <p>
+    <label align="center"><button class="button" onclick="sendCommand('left');">Left</button></label>
+    <label align="center"><button class="button" onclick="sendCommand('right');">Right</button></label>
+    <p>
+    <label align="center"><button class="button" onclick="sendCommand('stop');">Stop</button></label>
+    <p>
+    <label align="center"><button class="button" onclick="sendCommand('tilt_left');">Tilt Left</button></label>
+    <label align="center"><button class="button" onclick="sendCommand('tilt_right');">Tilt Right</button></label>
+    <p>
+    <label align="center"><button class="button" onclick="sendCommand('stand');">Stand</button></label>
+    <label align="center"><button class="button" onclick="sendCommand('wheel');">Wheel</button></label>
+    <p>
+    <label align="center"><button class="button" onclick="getStatus();">Get Status</button></label>
+    <p>
+    <div id="status"></div>
+    <script>
+        function sendCommand(action) {
+            var xhr = new XMLHttpRequest();
+            xhr.open("GET", "/cmd?action=" + action, true);
+            xhr.send();
+        }
+        function getStatus() {
+            var xhr = new XMLHttpRequest();
+            xhr.onreadystatechange = function() {
+                if (this.readyState == 4 && this.status == 200) {
+                    document.getElementById("status").innerHTML = this.responseText;
+                }
+            };
+            xhr.open("GET", "/status", true);
+            xhr.send();
+        }
+    </script>
+</body>
+</html>
+)rawliteral";
+
+SCSCL sc; // SC series servo control class
+
+// Servo IDs
+#define LEFT_WHEEL_ID 1
+#define RIGHT_WHEEL_ID 3
+#define LEFT_FOOT_ID 4
+#define RIGHT_FOOT_ID 2
+
+// Positions and modes
+#define LEFT_WHEEL_STANDING_POS 1000
+#define RIGHT_WHEEL_STANDING_POS 1000
+#define LEFT_FOOT_STANDING_POS 490
+#define RIGHT_FOOT_STANDING_POS 530
+#define LEFT_FOOT_WHEEL_POS 764
+#define RIGHT_FOOT_WHEEL_POS 250
+
+#define MODE_STANDING 0
+#define MODE_WHEEL 1
+
+int currentMode = MODE_STANDING;
+
+AsyncWebServer server(80);
+
+void setup() {
+  Serial.begin(115200); // For debug messages
+  Serial1.begin(1000000, SERIAL_8N1, 18, 19); // SC servo communication
+  sc.pSerial = &Serial1;
+
+  // Configure servos
+  configureServos();
+
+  // Initialize WiFi
+  WiFi.softAP("0000", "12121212");
+  IPAddress IP = WiFi.softAPIP();
+  Serial.print("AP IP address: ");
+  Serial.println(IP);
+
+  // Set up web server routes
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send_P(200, "text/html", index_html);
+  });
+
+  server.on("/cmd", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (request->hasParam("action")) {
+      String action = request->getParam("action")->value();
+      if (action == "forward") {
+        moveWheels(300, 300);
+      } else if (action == "backward") {
+        moveWheels(-300, -300);
+      } else if (action == "left") {
+        moveWheels(-300, 300);
+      } else if (action == "right") {
+        moveWheels(300, -300);
+      } else if (action == "stop") {
+        moveWheels(0, 0);
+      } else if (action == "tilt_left") {
+        tiltLeft();
+      } else if (action == "tilt_right") {
+        tiltRight();
+      } else if (action == "stand") {
+        setStandingMode();
+      } else if (action == "wheel") {
+        setWheelMode();
+      }
+    }
+    request->send(200, "text/plain", "Command executed");
+  });
+
+  server.on("/status", HTTP_GET, [](AsyncWebServerRequest *request) {
+    String status = getStatus();
+    request->send(200, "text/plain", status);
+  });
+
+  server.begin();
+}
+
+void loop() {
+  // Main loop can be used for additional tasks if needed
+}
+
+void configureServos() {
+  // Configure left wheel (ID 1)
+  sc.unLockEprom(LEFT_WHEEL_ID);
+  sc.PWMMode(LEFT_WHEEL_ID);
+  sc.LockEprom(LEFT_WHEEL_ID);
+  sc.EnableTorque(LEFT_WHEEL_ID, 1);
+
+  // Configure right wheel (ID 3)
+  sc.unLockEprom(RIGHT_WHEEL_ID);
+  sc.PWMMode(RIGHT_WHEEL_ID);
+  sc.LockEprom(RIGHT_WHEEL_ID);
+  sc.EnableTorque(RIGHT_WHEEL_ID, 1);
+
+  // Configure left foot (ID 4)
+  sc.unLockEprom(LEFT_FOOT_ID);
+  sc.WritePos(LEFT_FOOT_ID, LEFT_FOOT_STANDING_POS, 0, 300);
+  sc.LockEprom(LEFT_FOOT_ID);
+  sc.EnableTorque(LEFT_FOOT_ID, 1);
+
+  // Configure right foot (ID 2)
+  sc.unLockEprom(RIGHT_FOOT_ID);
+  sc.WritePos(RIGHT_FOOT_ID, RIGHT_FOOT_STANDING_POS, 0, 300);
+  sc.LockEprom(RIGHT_FOOT_ID);
+  sc.EnableTorque(RIGHT_FOOT_ID, 1);
+
+  // Set to standing mode initially
+  setStandingMode();
+}
+
+void moveWheels(int left_speed, int right_speed) {
+  sc.WritePWM(LEFT_WHEEL_ID, left_speed);
+  sc.WritePWM(RIGHT_WHEEL_ID, right_speed);
+  Serial.print("Left: "); Serial.print(left_speed);
+  Serial.print(" | Right: "); Serial.println(right_speed);
+}
+
+void tiltLeft() {
+  sc.WritePos(LEFT_FOOT_ID, 390, 0, 300);
+  delay(1000);
+  sc.WritePos(RIGHT_FOOT_ID, 350, 0, 300);
+  delay(1000);
+  setStandingMode();
+}
+
+void tiltRight() {
+  sc.WritePos(RIGHT_FOOT_ID, 350, 0, 300);
+  delay(1000);
+  sc.WritePos(LEFT_FOOT_ID, 390, 0, 300);
+  delay(1000);
+  setStandingMode();
+}
+
+void setStandingMode() {
+  currentMode = MODE_STANDING;
+  sc.WritePos(LEFT_WHEEL_ID, LEFT_WHEEL_STANDING_POS, 0, 300);
+  sc.WritePos(RIGHT_WHEEL_ID, RIGHT_WHEEL_STANDING_POS, 0, 300);
+  sc.WritePos(LEFT_FOOT_ID, LEFT_FOOT_STANDING_POS, 0, 300);
+  sc.WritePos(RIGHT_FOOT_ID, RIGHT_FOOT_STANDING_POS, 0, 300);
+}
+
+void setWheelMode() {
+  currentMode = MODE_WHEEL;
+  sc.tus += "Left Foot Pos: "; status += sc.ReadPos(LEFT_FOOT_ID); status += "\n";
+  status += "Right Foot Pos: "; status += sc.ReadPos(RIGHT_FOOT_ID); status += "\n";
+
+  return status;
+}WritePos(LEFT_WHEEL_ID, LEFT_WHEEL_STANDING_POS, 0, 300);
+  sc.WritePos(RIGHT_WHEEL_ID, RIGHT_WHEEL_STANDING_POS, 0, 300);
+  sc.WritePos(LEFT_FOOT_ID, LEFT_FOOT_WHEEL_POS, 0, 300);
+  sc.WritePos(RIGHT_FOOT_ID, RIGHT_FOOT_WHEEL_POS, 0, 300);
+}
+
+String getStatus() {
+  String status = "Mode: ";
+  if (currentMode == MODE_STANDING) {
+    status += "Standing\n";
+  } else {
+    status += "Wheel\n";
+  }
+
+  status += "Left Wheel Pos: "; status += sc.ReadPos(LEFT_WHEEL_ID); status += "\n";
+  status += "Right Wheel Pos: "; status += sc.ReadPos(RIGHT_WHEEL_ID); status += "\n";
+  status += "Left Foot Pos: "; status += sc.ReadPos(LEFT_FOOT_ID); status += "\n";
+  status += "Right Foot Pos: "; status += sc.ReadPos(RIGHT_FOOT_ID); status += "\n";
+
+  return status;
+}
+
+version 1.2
+
+#include <SCServo.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <ESPAsyncWebServer.h>
+#include <ArduinoJson.h>
+
+SCSCL sc;
+AsyncWebSocket ws("/ws");
+
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE HTML>
+<html>
+<head>
+  <title>CAKE Robot Control</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { background: #000; color: #fff; text-align: center; }
+    button {
+      padding: 15px;
+      margin: 5px;
+      font-size: 20px;
+      background: #4CAF50;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+    button:hover { background: #45a049; }
+    #status { color: #fff; margin: 20px; }
+  </style>
+</head>
+<body>
+  <h2>CAKE Robot Controller</h2>
+  <div id="status"></div>
+
+  <div style="margin:20px">
+    <button onclick="sendCmd('forward')">↑</button>
+    <button onclick="sendCmd('left')">&larr;</button>
+    <button onclick="sendCmd('right')">&rarr;</button>
+    <button onclick="sendCmd('backward')">↓</button>
+    <button onclick="sendCmd('stop')">Stop</button>
+  </div>
+
+  <div>
+    <button onclick="sendCmd('tilt_left')">Lean Left</button>
+    <button onclick="sendCmd('tilt_right')">Lean Right</button>
+    <button onclick="sendCmd('neutral')">Neutral</button>
+    <button onclick="sendCmd('fall_left')">Fall Left</button>
+    <button onclick="sendCmd('fall_right')">Fall Right</button>
+    <button onclick="sendCmd('spin_tilted')">Spin Tilted</button>
+  </div>
+
+  <div>
+    <button onclick="setSpeed(200)">Slow</button>
+    <button onclick="setSpeed(300)">Medium</button>
+    <button onclick="setSpeed(400)">Fast</button>
+  </div>
+
+  <script>
+    let ws = new WebSocket('ws://' + location.host + '/ws');
+
+    function sendCmd(cmd) {
+      fetch('/cmd?action=' + cmd);
+    }
+
+    function setSpeed(speed) {
+      ws.send(JSON.stringify({command: 'speed', value: speed}));
+    }
+
+    ws.onmessage = (event) => {
+      document.getElementById('status').innerHTML = event.data;
+    };
+
+    setInterval(() => {
+      fetch('/status').then(res => res.text()).then(data => {
+        document.getElementById('status').innerHTML = data;
+      });
+    }, 1000);
+  </script>
+</body>
+</html>
+)rawliteral";
+
+// Servo IDs
+#define LEFT_WHEEL_ID 1
+#define RIGHT_WHEEL_ID 3
+#define LEFT_FOOT_ID 4
+#define RIGHT_FOOT_ID 2
+
+// Positions and modes
+#define LEFT_WHEEL_STANDING_POS 1000
+#define RIGHT_WHEEL_STANDING_POS 1000
+#define LEFT_FOOT_STANDING_POS 490
+#define RIGHT_FOOT_STANDING_POS 530
+#define LEFT_FOOT_WHEEL_POS 764
+#define RIGHT_FOOT_WHEEL_POS 250
+
+#define MODE_STANDING 0
+#define MODE_WHEEL 1
+
+int currentMode = MODE_STANDING;
+int currentSpeed = 300;
+bool isTilted = false;
+
+AsyncWebServer server(80);
+
+void moveWheels(int left_speed, int right_speed) {
+  sc.WritePWM(LEFT_WHEEL_ID, left_speed);
+  sc.WritePWM(RIGHT_WHEEL_ID, right_speed);
+  Serial.printf("L: %d R: %d\n", left_speed, right_speed);
+}
+
+void moveForward() { moveWheels(currentSpeed, currentSpeed); }
+void moveBackward() { moveWheels(-currentSpeed, -currentSpeed); }
+void moveLeft() { moveWheels(-currentSpeed, currentSpeed); }
+void moveRight() { moveWheels(currentSpeed, -currentSpeed); }
+void moveStop() { moveWheels(0, 0); }
+
+void smoothServoMove(int id, int target) {
+  int current = sc.ReadPos(id);
+  for (int i = current; i != target; i += (target > current ? 1 : -1)) {
+    sc.WritePos(id, i, 0, 150);
+    delay(20);
+  }
+}
+
+void tiltLeft() {
+  smoothServoMove(RIGHT_FOOT_ID, 650);
+  smoothServoMove(LEFT_FOOT_ID, 570);
+  delay(500);
+  isTilted = true;
+}
+
+void tiltRight() {
+  smoothServoMove(LEFT_FOOT_ID, 390);
+  smoothServoMove(RIGHT_FOOT_ID, 470);
+  delay(500);
+  smoothServoMove(LEFT_FOOT_ID, 390);
+  smoothServoMove(RIGHT_FOOT_ID, 350);
+  isTilted = true;
+}
+
+void setStandingMode() {
+  currentMode = MODE_STANDING;
+  isTilted = false;
+  sc.WritePos(LEFT_FOOT_ID, LEFT_FOOT_STANDING_POS, 0, 300);
+  sc.WritePos(RIGHT_FOOT_ID, RIGHT_FOOT_STANDING_POS, 0, 300);
+}
+
+void fallLeft() {
+  tiltLeft();
+  sc.WritePos(LEFT_FOOT_ID, LEFT_FOOT_WHEEL_POS, 0, 300);
+}
+
+void fallRight() {
+  tiltRight();
+  sc.WritePos(RIGHT_FOOT_ID, RIGHT_FOOT_WHEEL_POS, 0, 300);
+}
+
+void spinWhileTilted() {
+  if (isTilted) {
+    moveWheels(currentSpeed, 0);
+  }
+}
+
+void emergencyStop() {
+  moveStop();
+  setStandingMode();
+}
+
+String getStatus() {
+  String status = "Battery: ";
+  status += sc.ReadVoltage(RIGHT_FOOT_ID);
+  status += "V | Mode: ";
+  status += (currentMode == MODE_STANDING) ? "Standing" : "Wheel";
+  return status;
+}
+
+void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
+  if (type == WS_EVT_DATA) {
+    AwsFrameInfo *info = (AwsFrameInfo*)arg;
+    if (info->final && info->index == 0 && info->len == len && info->opcode == WS_TEXT) {
+      DynamicJsonDocument doc(200);
+      deserializeJson(doc, (char*)data);
+      String command = doc["command"];
+      int value = doc["value"];
+      if (command == "speed") {
+        currentSpeed = value;
+      } else if (command == "move") {
+        moveWheels(value, -value);
+      }
+    }
+  }
+}
+
+void setupWebServer() {
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send_P(200, "text/html", index_html);
+  });
+
+  server.on("/cmd", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (request->hasParam("action")) {
+      String action = request->getParam("action")->value();
+      if (action == "forward") moveForward();
+      else if (action == "backward") moveBackward();
+      else if (action == "left") moveLeft();
+      else if (action == "right") moveRight();
+      else if (action == "stop") moveStop();
+      else if (action == "tilt_left") tiltLeft();
+      else if (action == "tilt_right") tiltRight();
+      else if (action == "neutral") setStandingMode();
+      else if (action == "fall_left") fallLeft();
+      else if (action == "fall_right") fallRight();
+      else if (action == "spin_tilted") spinWhileTilted();
+    }
+    request->send(200, "text/plain", "OK");
+  });
+
+  server.on("/status", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(200, "text/plain", getStatus());
+  });
+
+  server.addHandler(&ws);
+  ws.onEvent(onWsEvent);
+  server.begin();
+}
+
+void configureServos() {
+  for (int id : {LEFT_WHEEL_ID, RIGHT_WHEEL_ID}) {
+    sc.unLockEprom(id);
+    sc.PWMMode(id);
+    sc.LockEprom(id);
+    sc.EnableTorque(id, 1);
+  }
+
+  for (int id : {LEFT_FOOT_ID, RIGHT_FOOT_ID}) {
+    sc.unLockEprom(id);
+    sc.WritePos(id, sc.ReadPos(id), 0, 300);
+    sc.LockEprom(id);
+    sc.EnableTorque(id, 1);
+  }
+}
+
+void pingAllServos() {
+  for (int id = 1; id <= 4; id++) {
+    if (sc.Ping(id) != -1) {
+      Serial.printf("Servo %d online\n", id);
+    }
+  }
+}
+
+void initWiFi() {
+  WiFi.softAP("CAKE_ROBOT", "12345678");
+  Serial.println(WiFi.softAPIP());
+}
+
+void setup() {
+  Serial.begin(115200);
+  Serial1.begin(1000000, SERIAL_8N1, 18, 19);
+  sc.pSerial = &Serial1;
+
+  configureServos();
+  initWiFi();
+  setupWebServer();
+  pingAllServos();
+
+  setStandingMode();
+}
+
+void loop() {
+  ws.cleanupClients();
+
+  // Optional auto-stabilization
+  static unsigned long lastCheck = 0;
+  if (isTilted && millis() - lastCheck > 1000) {
+    int leftPos = sc.ReadPos(LEFT_FOOT_ID);
+    int rightPos = sc.ReadPos(RIGHT_FOOT_ID);
+    if (abs(leftPos - LEFT_FOOT_STANDING_POS) > 200 || abs(rightPos - RIGHT_FOOT_STANDING_POS) > 200) {
+      emergencyStop();
+    }
+    lastCheck = millis();
+  }
+
+  delay(10);
+}
+
+
+version 3
+#include <SCServo.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+
+// HTML Web Interface
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE HTML>
+<html>
+<head>
+    <title>OttoNinja Control</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="icon" href="data:,">
+    <style>
+        html {
+            font-family: Arial;
+            display: inline-block;
+            background: #000000;
+            color: #efefef;
+            text-align: center;
+        }
+        h2 {
+            font-size: 3.0rem;
+        }
+        p {
+            font-size: 1.0rem;
+        }
+        body {
+            max-width: 600px;
+            margin: 0px auto;
+            padding-bottom: 25px;
+        }
+        button {
+            display: inline-block;
+            margin: 5px;
+            padding: 10px 10px;
+            border: 0;
+            line-height: 21px;
+            cursor: pointer;
+            color: #fff;
+            background: #4247b7;
+            border-radius: 5px;
+            font-size: 21px;
+            outline: 0;
+            width: 150px;
+            -webkit-touch-callout: none;
+            -webkit-user-select: none;
+            -khtml-user-select: none;
+            -moz-user-select: none;
+            -ms-user-select: none;
+            user-select: none;
+        }
+        button:hover {
+            background: #ff494d
+        }
+        button:active {
+            background: #f21c21
+        }
+        select {
+            display: inline-block;
+            margin: 5px;
+            padding: 10px 10px;
+            border: 0;
+            line-height: 21px;
+            cursor: pointer;
+            color: #fff;
+            background: #4247b7;
+            border-radius: 5px;
+            font-size: 21px;
+            outline: 0;
+            width: 150px;
+            -webkit-touch-callout: none;
+            -webkit-user-select: none;
+            -khtml-user-select: none;
+            -moz-user-select: none;
+            -ms-user-select: none;
+            user-select: none;
+        }
+        select:hover {
+            background: #ff494d
+        }
+        select:active {
+            background: #f21c21
+        }
+    </style>
+</head>
+<body>
+    <h3>OttoNinja Control Panel</h3>
+    <p>
+    <label align="center"><button class="button" onclick="sendCommand('forward');">Forward</button></label>
+    <label align="center"><button class="button" onclick="sendCommand('backward');">Backward</button></label>
+    <p>
+    <label align="center"><button class="button" onclick="sendCommand('left');">Left</button></label>
+    <label align="center"><button class="button" onclick="sendCommand('right');">Right</button></label>
+    <p>
+    <label align="center"><button class="button" onclick="sendCommand('stop');">Stop</button></label>
+    <p>
+    <label align="center"><button class="button" onclick="sendCommand('tilt_left');">Tilt Left</button></label>
+    <label align="center"><button class="button" onclick="sendCommand('tilt_right');">Tilt Right</button></label>
+    <p>
+    <label align="center"><button class="button" onclick="sendCommand('stand');">Stand</button></label>
+    <label align="center"><button class="button" onclick="sendCommand('wheel');">Wheel</button></label>
+    <p>
+    <label align="center"><button class="button" onclick="getStatus();">Get Status</button></label>
+    <p>
+    <label align="center"><select id="speedSelect" onchange="changeSpeed(this.value);">
+        <option value="slow">Slow</option>
+        <option value="medium" selected>Medium</option>
+        <option value="fast">Fast</option>
+    </select></label>
+    <p>
+    <div id="status"></div>
+    <script>
+        function sendCommand(action) {
+            var xhr = new XMLHttpRequest();
+            xhr.open("GET", "/cmd?action=" + action, true);
+            xhr.send();
+        }
+        function getStatus() {
+            var xhr = new XMLHttpRequest();
+            xhr.onreadystatechange = function() {
+                if (this.readyState == 4 && this.status == 200) {
+                    document.getElementById("status").innerHTML = this.responseText;
+                }
+            };
+            xhr.open("GET", "/status", true);
+            xhr.send();
+        }
+        function changeSpeed(speed) {
+            var xhr = new XMLHttpRequest();
+            xhr.open("GET", "/speed?preset=" + speed, true);
+            xhr.send();
+        }
+    </script>
+</body>
+</html>
+)rawliteral";
+
+// Servo Control Class
+SCSCL sc;
+
+// Servo IDs
+#define LEFT_WHEEL_ID 1
+#define RIGHT_WHEEL_ID 3
+#define LEFT_FOOT_ID 4
+#define RIGHT_FOOT_ID 2
+
+// Positions and Modes
+#define LEFT_WHEEL_STANDING_POS 1000
+#define RIGHT_WHEEL_STANDING_POS 1000
+#define LEFT_FOOT_STANDING_POS 490
+#define RIGHT_FOOT_STANDING_POS 530
+#define LEFT_FOOT_WHEEL_POS 764
+#define RIGHT_FOOT_WHEEL_POS 250
+
+#define MODE_STANDING 0
+#define MODE_WHEEL 1
+#define MODE_TILTED_LEFT 2
+#define MODE_TILTED_RIGHT 3
+
+int currentMode = MODE_STANDING;
+
+// Speed Presets
+#define SLOW_PWM 100
+#define MEDIUM_PWM 300
+#define FAST_PWM 500
+
+int currentSpeed = MEDIUM_PWM;
+
+AsyncWebServer server(80);
+
+// Function Prototypes
+void setup();
+void loop();
+void configureServos();
+void moveWheels(int left_speed, int right_speed);
+void tiltLeft();
+void tiltRight();
+void setStandingMode();
+void setWheelMode();
+void setTiltLeftMode();
+void setTiltRightMode();
+void rampPWM(int left_start, int right_start, int left_end, int right_end, int duration);
+String getStatus();
+void changeSpeed(String preset);
+
+void setup() {
+  Serial.begin(115200); // For debug messages
+  Serial1.begin(1000000, SERIAL_8N1, 18, 19); // SC servo communication
+  sc.pSerial = &Serial1;
+
+  // Configure servos
+  configureServos();
+
+  // Initialize WiFi
+  WiFi.softAP("CAKE_ROBOT", "12345678");
+  IPAddress IP = WiFi.softAPIP();
+  Serial.print("AP IP address: ");
+  Serial.println(IP);
+
+  // Set up web server routes
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send_P(200, "text/html", index_html);
+  });
+
+  server.on("/cmd", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (request->hasParam("action")) {
+      String action = request->getParam("action")->value();
+      if (action == "forward") {
+        moveWheels(currentSpeed, -currentSpeed);
+      } else if (action == "backward") {
+        moveWheels(-currentSpeed, currentSpeed);
+      } else if (action == "left") {
+        moveWheels(-currentSpeed, -currentSpeed);
+      } else if (action == "right") {
+        moveWheels(currentSpeed, currentSpeed);
+      } else if (action == "stop") {
+        moveWheels(0, 0);
+      } else if (action == "tilt_left") {
+        tiltLeft();
+      } else if (action == "tilt_right") {
+        tiltRight();
+      } else if (action == "stand") {
+        setStandingMode();
+      } else if (action == "wheel") {
+        setWheelMode();
+      }
+    }
+    request->send(200, "text/plain", "Command executed");
+  });
+
+  server.on("/status", HTTP_GET, [](AsyncWebServerRequest *request) {
+    String status = getStatus();
+    request->send(200, "text/plain", status);
+  });
+
+  server.on("/speed", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (request->hasParam("preset")) {
+      String preset = request->getParam("preset")->value();
+      changeSpeed(preset);
+    }
+    request->send(200, "text/plain", "Speed changed");
+  });
+
+  server.begin();
+}
+
+void loop() {
+  // Main loop can be used for additional tasks if needed
+}
+
+void configureServos() {
+  // Configure wheels (IDs 1 and 3)
+  for (int id : {LEFT_WHEEL_ID, RIGHT_WHEEL_ID}) {
+    sc.unLockEprom(id);
+    sc.PWMMode(id); // Enable PWM mode for speed control
+    sc.LockEprom(id);
+    sc.EnableTorque(id, 1);
+    sc.WritePos(id, 1000, 0, 200); // Initial position to 1000
+  }
+
+  // Configure feet (IDs 4 and 2)
+  for (int id : {LEFT_FOOT_ID, RIGHT_FOOT_ID}) {
+    sc.unLockEprom(id);
+    sc.WritePos(id, (id == LEFT_FOOT_ID) ? LEFT_FOOT_STANDING_POS : RIGHT_FOOT_STANDING_POS, 0, 200);
+    sc.LockEprom(id);
+    sc.EnableTorque(id, 1);
+  }
+
+  setStandingMode();
+}
+
+void moveWheels(int left_speed, int right_speed) {
+  rampPWM(0, 0, left_speed, right_speed, 200); // Gradual start/stop
+}
+
+void tiltLeft() {
+  sc.WritePos(RIGHT_FOOT_ID, 650, 0, 200); // Move right leg to 650
+  delay(100); // Brief delay
+  sc.WritePos(LEFT_FOOT_ID, 570, 0, 200); // Move left leg to 570
+  delay(100); // Brief delay
+  sc.WritePos(RIGHT_FOOT_ID, 650, 0, 200); // Move right leg to 650 again
+  currentMode = MODE_TILTED_LEFT;
+}
+
+void tiltRight() {
+  sc.WritePos(LEFT_FOOT_ID, 390, 0, 200); // Move left leg to 390
+  delay(100); // Brief delay
+  sc.WritePos(RIGHT_FOOT_ID, 470, 0, 200); // Move right leg to 470
+  delay(100); // Brief delay
+  sc.WritePos(RIGHT_FOOT_ID, 350, 0, 200); // Move right leg to 350
+  currentMode = MODE_TILTED_RIGHT;
+}
+
+void setStandingMode() {
+  currentMode = MODE_STANDING;
+  sc.WritePos(LEFT_WHEEL_ID, LEFT_WHEEL_STANDING_POS, 0, 200);
+  sc.WritePos(RIGHT_WHEEL_ID, RIGHT_WHEEL_STANDING_POS, 0, 200);
+  sc.WritePos(LEFT_FOOT_ID, LEFT_FOOT_STANDING_POS, 0, 200);
+  sc.WritePos(RIGHT_FOOT_ID, RIGHT_FOOT_STANDING_POS, 0, 200);
+  sc.EnableTorque(LEFT_WHEEL_ID, 0); // Disable torque after standing
+  sc.EnableTorque(RIGHT_WHEEL_ID, 0);
+}
+
+void setWheelMode() {
+  currentMode = MODE_WHEEL;
+  sc.WritePos(LEFT_WHEEL_ID, LEFT_WHEEL_STANDING_POS, 0, 200);
+  sc.WritePos(RIGHT_WHEEL_ID, RIGHT_WHEEL_STANDING_POS, 0, 200);
+  sc.WritePos(LEFT_FOOT_ID, LEFT_FOOT_WHEEL_POS, 0, 200);
+  sc.WritePos(RIGHT_FOOT_ID, RIGHT_FOOT_WHEEL_POS, 0, 200);
+  sc.EnableTorque(LEFT_WHEEL_ID, 1); // Re-enable torque for wheels
+  sc.EnableTorque(RIGHT_WHEEL_ID, 1);
+}
+
+void setTiltLeftMode() {
+  currentMode = MODE_TILTED_LEFT;
+}
+
+void setTiltRightMode() {
+  currentMode = MODE_TILTED_RIGHT;
+}
+
+void rampPWM(int left_start, int right_start, int left_end, int right_end, int duration) {
+  int steps = 10;
+  int step_duration = duration / steps;
+  for (int i = 0; i <= steps; i++) {
+    int left_pwm = left_start + (left_end - left_start) * i / steps;
+    int right_pwm = right_start + (right_end - right_start) * i / steps;
+    sc.WritePWM(LEFT_WHEEL_ID, left_pwm);
+    sc.WritePWM(RIGHT_WHEEL_ID, right_pwm);
+    delay(step_duration);
+  }
+}
+
+String getStatus() {
+  String status = "Mode: ";
+  switch (currentMode) {
+    case MODE_STANDING:
+      status += "Standing\n";
+      break;
+    case MODE_WHEEL:
+      status += "Wheel\n";
+      break;
+    case MODE_TILTED_LEFT:
+      status += "Tilted Left\n";
+      break;
+    case MODE_TILTED_RIGHT:
+      status += "Tilted Right\n";
+      break;
+  }
+
+  status += "Left Wheel Pos: " + String(sc.ReadPos(LEFT_WHEEL_ID)) + "\n";
+  status += "Right Wheel Pos: " + String(sc.ReadPos(RIGHT_WHEEL_ID)) + "\n";
+  status += "Left Foot Pos: " + String(sc.ReadPos(LEFT_FOOT_ID)) + "\n";
+  status += "Right Foot Pos: " + String(sc.ReadPos(RIGHT_FOOT_ID)) + "\n";
+  status += "Battery: " + String(getBatteryPercentage()) + "%\n";
+
+  return status;
+}
+
+void changeSpeed(String preset) {
+  if (preset == "slow") {
+    currentSpeed = SLOW_PWM;
+  } else if (preset == "medium") {
+    currentSpeed = MEDIUM_PWM;
+  } else if (preset == "fast") {
+    currentSpeed = FAST_PWM;
+  }
+}
+
+float getBatteryPercentage() {
+  // Placeholder for battery percentage reading
+  // Replace with actual battery monitoring logic
+  // Example: Read from an analog pin or use a dedicated battery sensor
+  float batteryVoltage = analogRead(A0) * (3.3 / 4095.0) * 2; // Assuming a voltage divider
+  float batteryPercentage = (batteryVoltage - 3.7) / (4.2 - 3.7) * 100; // Assuming 3.7V is 0% and 4.2V is 100%
+  batteryPercentage = constrain(batteryPercentage, 0, 100);
+  return batteryPercentage;
+}
+
+
+(here all maneuer are working fine, all speed options are working, transition between modes are jerky... like to make it smooth,you made it laggy and jerky.., tilt right angle and working fine, tilt left working but angle is not ok,
+fetch battery 'v' form servo feed back, 
+add soomth transition (ramp up and down speed) in maneuver (f b r l) when robot is in wheel mode.
+i think tourque on off is not properly enabled... 
+it still backfalls in transition of stand and wheel and wheel to stand
+robots name is cake
+also add a torque on of button and state its behaviour and characteristics in different situations
+
+
+
+
+
+Robot: CAKE, a desktop companion inspired by Emo and Otto Ninja, with four SC servos (left wheel ID 1, right wheel ID 3, left foot ID 4, right foot ID 2), Neopixel LEDs, and an OLED (OLED code TBD).
+
+Issues to Fix:
+
+Movement Directions:
+Right button moves forward → Fix to turn right.
+Left button moves backward → Fix to turn left.
+Forward button turns right → Fix to move forward.
+Backward button turns left → Fix to move backward.
+Balance:
+Wheel and stand mode transitions cause backward falls.
+Tilt movements are too fast, causing imbalance.
+Tilt Mechanics:
+Left tilt: Move right leg to 650, slightly delayed left leg to 570 (start together, left lags briefly), then right leg to 650 (2nd step slower).
+Right tilt: Move left leg to 390, slightly delayed right leg to 470, then right leg to 350 (2nd step slower).
+New Features:
+
+Fall Action:
+Left fall: Like left tilt, but 2nd step moves right leg to 764.
+Right fall: Like right tilt, but 2nd step moves left leg to 250.
+Spin in Tilt:
+After tilting left/right, allow one wheel to spin independently at moderate speed (~200 PWM).
+Neutral Button:
+Add a button to return to standing mode after tilt; don’t auto-revert.
+Speed Control:
+Three presets: Slow (100 PWM), Medium (200 PWM), Fast (300 PWM), selectable via UI.
+Smooth Movement:
+Gradual wheel start/stop in forward/backward (ramp PWM over 200ms).
+Slow, stabilized tilt transitions (500ms per step, 50ms delay for slight lag).
+Balance:
+Prevent tipping with gradual servo moves (max 20 units/step).
+Check servo positions before moves to ensure valid range (0-1023).
+Requirements:
+
+UI: Mobile-only, touch-friendly, vertical layout, Tailwind CSS, with:
+Collapsible status panel (mode, battery, WiFi).
+Buttons for Forward, Backward, Left, Right, Stop, Tilt Left, Tilt Right, Fall Left, Fall Right, Spin Left, Spin Right, Stand, Wheel, Neutral.
+Speed toggle (Slow/Medium/Fast).
+Servo calibration modal with sliders for each servo.
+Code:
+Single, standalone file for ESP32.
+Use SCServo, WiFi, ESPAsyncWebServer, AsyncTCP, ArduinoJson, EEPROM, esp_task_wdt.
+Enums for modes (STANDING, WHEEL, TILTED_LEFT, TILTED_RIGHT) and commands.
+WebSocket for real-time control, 200ms rate limiting.
+Ping all servos at boot; halt if any fail.
+Smooth servo transitions (20 units/step, 10ms delay).
+Error handling for servo reads/writes.
+EEPROM for servo calibration persistence.
+Status dashboard via WebSocket (battery, mode, WiFi).
+Jerk-free workflow with gradual moves.
+Log buffer (10 messages, viewable at /logs).
+Goals:
+
+Reliable, engaging desktop companion.
+Maintainable code for future expansion (e.g., Neopixel, OLED).
+Prevent falls with slow, balanced transitions.
+User-friendly mobile UI with low-latency control.
