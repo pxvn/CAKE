@@ -1,3 +1,59 @@
+/**
+ * ============================================================================
+ *  Project       : CAKE Companion Robot - ESP32 Web-Controlled Firmware
+ *  Description   : Full firmware for an CAKE the desktop robot with
+ *                  posture control, wheel mobility, and real-time monitoring
+ *                  via a modern HTML dashboard served from  (async. webserver) ESP32.
+ *
+ *  Author        : Pavan K.
+ *  Board         : ESP32 and arduino nano
+ *  Servo Driver  : Waveshare Serial Servo Driver (SCServo - SCSCL)
+ *  Libraries     : 
+ *     - SCServo.h       : Controls SC09/SCSCL serial servos
+ *     - WiFi.h          : For SoftAP WiFi hosting
+ *     - ESPAsyncWebServer.h, AsyncTCP.h : For async HTTP server
+ *     - ArduinoJson.h   : Efficient JSON parsing/serialization
+ *
+ *  Features:
+ *  --------------------------------------------------------------------------
+ *  WiFi SoftAP Hosting with Web Interface
+ *  Realtime control of 4 servos (2 wheels + 2 posture legs)
+ *  Mode Switching (Standing, Wheel, Tilt Left, Tilt Right)
+ *  Speed Presets (Slow, Medium, Fast, Turbo)
+ *  Emergency Stop + Motion Commands (FWD, BWD, Turn)
+ *  System Monitoring: Voltage, Uptime, Motor Positions
+ *  Responsive UI with status polling (via JSON API)
+ *  Beautiful, mobile-optimized HTML dashboard
+ *
+ *  Servo Configuration:
+ *  --------------------------------------------------------------------------
+ *     - LEFT_WHEEL_ID  : ID 1
+ *     - RIGHT_WHEEL_ID : ID 3
+ *     - LEFT_FOOT_ID   : ID 4
+ *     - RIGHT_FOOT_ID  : ID 2
+ *
+ *  API Endpoints:
+ *  --------------------------------------------------------------------------
+ *     - GET /              : Serves HTML UI
+ *     - GET /cmd?action=   : Accepts motion/mode commands
+ *     - GET /speed?preset= : Updates speed preset (200–1000)
+ *     - GET /status        : Returns JSON with mode, voltage, IP, uptime, 
+ *                            and servo positions
+ *
+ *  Web UI Polling Interval: 1 second
+ *  Voltage Reporting: mapped to 0-100% (6.0V to 8.4V)
+ *
+ *  Note:
+ *  - SCSerial Baud: 1,000,000 bps via Serial1 on GPIO 18 (TX) and 19 (RX)
+ *  - SoftAP Name  : "CAKE_ROBOT"
+ *  - SoftAP Pass  : "12345678"
+ *  
+ *  Frontend:
+ *   BASED ON EMBEDDED HTML,CSS,JS 
+ *   EVERYTHING DESIGNED AND RUNS LOCALLY AND NOTHING IS FETCHED FROM ONLINE LIBS. LIKE CDN. 
+ * ============================================================================
+ */
+
 #include <SCServo.h>
 #include <WiFi.h>
 #include <AsyncTCP.h>
@@ -8,7 +64,6 @@
 
 SCSCL sc;
 
-// Operation Modes
 enum RobotMode { 
   MODE_STANDING, 
   MODE_WHEEL, 
@@ -16,16 +71,13 @@ enum RobotMode {
   MODE_TILTED_RIGHT 
 };
 
-// Speed Presets
 enum SpeedPreset { SLOW = 200, MEDIUM = 400, FAST = 700, TURBO = 1000 };
 
-// Servo Configuration
 #define LEFT_WHEEL_ID 1
 #define RIGHT_WHEEL_ID 3
 #define LEFT_FOOT_ID 4
 #define RIGHT_FOOT_ID 2
 
-// System State
 struct SystemState {
   RobotMode mode = MODE_STANDING;
   float voltage = 0.0;
@@ -38,7 +90,6 @@ SystemState systemState;
 AsyncWebServer server(80);
 SpeedPreset currentSpeed = MEDIUM;
 
-// Keep the HTML content from your UI at the end
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html lang="en">
@@ -382,15 +433,12 @@ void setup() {
   Serial1.begin(1000000, SERIAL_8N1, 18, 19);
   sc.pSerial = &Serial1;
 
-  // Servo Initialization
   configureServos();
 
-  // WiFi Setup
   WiFi.softAP("CAKE_ROBOT", "12345678");
   Serial.print("AP IP: ");
   Serial.println(WiFi.softAPIP());
 
-  // Web Server Endpoints
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
     request->send_P(200, "text/html", index_html);
   });
@@ -434,7 +482,6 @@ void setup() {
 void loop() {
   unsigned long currentMillis = millis();
   
-  // Update system state every 2 seconds
   static unsigned long lastUpdate;
   if(currentMillis - lastUpdate >= 2000) {
     updateBattery();
@@ -442,16 +489,13 @@ void loop() {
     lastUpdate = currentMillis;
   }
 
-  // Emergency stop on connection loss
   if(currentMillis - systemState.lastCommand > 2000 && systemState.connected) {
     emergencyStop();
     systemState.connected = false;
   }
 }
 
-// Servo Configuration
 void configureServos() {
-  // Configure wheels in PWM mode
   for(int id : {LEFT_WHEEL_ID, RIGHT_WHEEL_ID}) {
     sc.unLockEprom(id);
     sc.PWMMode(id);
@@ -459,7 +503,6 @@ void configureServos() {
     sc.EnableTorque(id, 1);
   }
 
-  // Configure feet in position mode
   for(int id : {LEFT_FOOT_ID, RIGHT_FOOT_ID}) {
     sc.unLockEprom(id);
     sc.WritePos(id, (id == LEFT_FOOT_ID) ? 490 : 530, 0, 400);
@@ -468,7 +511,6 @@ void configureServos() {
   }
 }
 
-// Movement Functions
 void moveWheels(int left, int right) {
   sc.WritePWM(LEFT_WHEEL_ID, constrain(left, -1000, 1000));
   sc.WritePWM(RIGHT_WHEEL_ID, constrain(right, -1000, 1000));
@@ -492,7 +534,6 @@ void tiltRight() {
   systemState.mode = MODE_TILTED_RIGHT;
 }
 
-// System Functions
 void updateBattery() {
   int raw = sc.ReadVoltage(LEFT_WHEEL_ID);
   systemState.voltage = raw != -1 ? raw * 0.1 : 0.0;
@@ -517,7 +558,6 @@ void handleCommand(AsyncWebServerRequest *request) {
   else if(action == "wheel")    setWheelMode();
 }
 
-// Mode Functions
 void setStandingMode() {
   systemState.mode = MODE_STANDING;
   sc.WritePos(LEFT_FOOT_ID, 490, 0, 400);
