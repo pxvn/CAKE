@@ -1,6 +1,67 @@
+/**
+ * =============================================================================
+ * Project Name : CAKE – The Desktop Companion Robot
+ * File         : main.ino AND disledfinal.ino
+ * Author       : Pavan K.
+ * Iteration    : 34
+ * Date         : 19th April 2025
+ * =============================================================================
+ * Description:
+ * This firmware controls the core boot-up animations and expressions of CAKE,
+ * a compact desktop companion robot inspired by EMO and HP Otto Invent.
+ * 
+ * Main Functionalities:
+ * ---------------------
+ * 1. OLED Display Control:
+ *    - Uses Adafruit SSD1306 for displaying boot messages and eye animations.
+ *    - Displays boot sequence text followed by animated eye states.
+ * 
+ * 2. FluxGarage RoboEyes Integration:
+ *    - Animates expressive eye states: blink, open, close, angry, etc.
+ *    - Controls mood-based flickering and autoblinking behavior.
+ * 
+ * 3. NeoPixel LED Effects:
+ *    - Under-glow RGB effects based on boot phase and mood.
+ *    - Sequential boot-up illumination and mood-based lighting (e.g., angry red pulse).
+ * 
+ * 4. State Machine Architecture:
+ *    - Uses an enum-based state machine to control sequential animations:
+ *        - STATE_BOOT_LEDS → STATE_BOOT_MSG1 → STATE_BOOT_MSG2
+ *        - → STATE_EYES_CLOSED → STATE_EYES_OPEN → STATE_BLINK_PHASE → STATE_ANGRY_MODE
+ * 
+ * 5. Modular Functions:
+ *    - `handleDisplay()`: Manages text drawing and eye updates.
+ *    - `updateLEDs()`: Handles RGB animations and LED sequences.
+ *    - `updateEyes()`: Updates eye expressions and behavior.
+ *    - `drawCenteredText()`: Utility for text alignment on OLED.
+ * 
+ * Dependencies:
+ * -------------
+ * - Adafruit_SSD1306
+ * - Adafruit_GFX
+ * - FluxGarage_RoboEyes (custom library for OLED eye animations)
+ * - Adafruit_NeoPixel
+ * 
+ * Hardware:
+ * ---------
+ * - ESP32 MCU AND ARDUINO NANO
+ * - 2.4" OLED Display (SSD1306)
+ * - NeoPixel RGB LEDs (x4)
+ * - SC09 Serial Servo Driver 
+ 
+ * Notes:
+ * ------
+ * - Designed for stable startup animations and characterful interaction.
+ * - Flickering and blinking features are optimized for performance.
+ * - Intended as the visual layer of CAKE's emotion and boot logic.
+ * - Further Utility additions are supposed to be added in further devlopment.
+ *   (such as - displaying time-date, calender, setting alarm, sticky ntotes...
+ * =============================================================================
+ */
+
+
 #include <Adafruit_SSD1306.h>
 
-// OLED Configuration
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_MOSI 23
@@ -15,13 +76,11 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT,
 #include <FluxGarage_RoboEyes.h>
 roboEyes eyes;
 
-// NeoPixel Configuration
 #include <Adafruit_NeoPixel.h>
 #define LED_PIN 27
 #define LED_COUNT 4
 Adafruit_NeoPixel leds(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 
-// Animation States
 enum AnimationState {
   STATE_BOOT_LEDS,
   STATE_BOOT_MSG1,
@@ -32,7 +91,6 @@ enum AnimationState {
   STATE_ANGRY_MODE
 };
 
-// Global Variables
 AnimationState currentState = STATE_BOOT_LEDS;
 unsigned long stateTimer = 0;
 uint8_t ledSequence = 0;
@@ -41,7 +99,6 @@ bool ledsAllOn = false;
 void setup() {
   Serial.begin(115200);
   
-  // Initialize display
   if(!display.begin(SSD1306_SWITCHCAPVCC)) {
     Serial.println(F("SSD1306 allocation failed"));
     for(;;);
@@ -49,15 +106,13 @@ void setup() {
   display.dim(true);
   display.setTextWrap(false);
   display.clearDisplay();
-  display.display();  // Clear the display initially
+  display.display();  
 
-  // Initialize eyes
-  eyes.begin(SCREEN_WIDTH, SCREEN_HEIGHT, 60); // Lower framerate for stability
-  eyes.setHFlicker(OFF);  // Turn off horizontal flickering
-  eyes.setVFlicker(OFF);  // Turn off vertical flickering
+  eyes.begin(SCREEN_WIDTH, SCREEN_HEIGHT, 60); 
+  eyes.setHFlicker(OFF);  
+  eyes.setVFlicker(OFF);  
   eyes.close();
 
-  // Initialize LEDs
   leds.begin();
   leds.setBrightness(100);
   leds.clear();
@@ -69,7 +124,6 @@ void setup() {
 void loop() {
   unsigned long currentMillis = millis();
   
-  // State transitions
   switch(currentState) {
     case STATE_BOOT_LEDS:
       if(ledSequence >= LED_COUNT) {
@@ -91,7 +145,7 @@ void loop() {
       if(currentMillis - stateTimer > 2000) {
         currentState = STATE_EYES_CLOSED;
         stateTimer = millis();
-        display.clearDisplay();  // Clear display before showing eyes
+        display.clearDisplay();
         display.display();
         eyes.close();
       }
@@ -101,8 +155,8 @@ void loop() {
       if(currentMillis - stateTimer > 500) {
         currentState = STATE_EYES_OPEN;
         stateTimer = millis();
-        eyes.setHFlicker(OFF);  // Make sure flickering is off
-        eyes.setVFlicker(OFF);  // Make sure vertical flickering is off
+        eyes.setHFlicker(OFF);  
+        eyes.setVFlicker(OFF);  
         eyes.open();
       }
       break;
@@ -111,7 +165,7 @@ void loop() {
       if(currentMillis - stateTimer > 2000) {
         currentState = STATE_BLINK_PHASE;
         stateTimer = millis();
-        eyes.setAutoblinker(true, 2500, 500);  // Enable automatic blinking with 2.5s interval and 500ms variation
+        eyes.setAutoblinker(true, 2500, 500);  
       }
       break;
       
@@ -119,9 +173,9 @@ void loop() {
       if(currentMillis - stateTimer > 5000) {
         currentState = STATE_ANGRY_MODE;
         stateTimer = millis();
-        eyes.setAutoblinker(OFF);  // Turn off auto-blinker before changing mood
+        eyes.setAutoblinker(OFF); 
         eyes.setMood(ANGRY);
-        eyes.setVFlicker(ON, 3);  // Vertical flickering for angry mode
+        eyes.setVFlicker(ON, 3);  
       }
       break;
   }
@@ -133,16 +187,15 @@ void loop() {
 
 void handleDisplay() {
   static unsigned long lastDraw = 0;
-  if(millis() - lastDraw < 50) return; // Stable 20fps
+  if(millis() - lastDraw < 50) return; 
   
-  // Only clear display in text states
   if(currentState == STATE_BOOT_MSG1 || currentState == STATE_BOOT_MSG2) {
     display.clearDisplay();
   }
 
   switch(currentState) {
     case STATE_BOOT_MSG1:
-      drawCenteredText("Hi I am,", 2, 0);  // Removed extra space
+      drawCenteredText("Hi I am,", 2, 0);  
       break;
       
     case STATE_BOOT_MSG2:
@@ -153,11 +206,9 @@ void handleDisplay() {
     case STATE_EYES_OPEN:
     case STATE_BLINK_PHASE:
     case STATE_ANGRY_MODE:
-      // Let RoboEyes handle drawing
       break;
   }
 
-  // Only display in text states or after the eyes update
   if(currentState == STATE_BOOT_MSG1 || currentState == STATE_BOOT_MSG2) {
     display.display();
   }
@@ -165,7 +216,6 @@ void handleDisplay() {
   lastDraw = millis();
 }
 
-// Modified to add vertical offset
 void drawCenteredText(const char* text, uint8_t textSize, int8_t yOffset) {
   display.setTextSize(textSize);
   display.setTextColor(SSD1306_WHITE);
@@ -183,7 +233,7 @@ void updateLEDs() {
   switch(currentState) {
     case STATE_BOOT_LEDS:
       if(millis() - lastLedChange > 200 && ledSequence < LED_COUNT) {
-        leds.setPixelColor(ledSequence, leds.Color(0, 0, 150));  // Blue color
+        leds.setPixelColor(ledSequence, leds.Color(0, 0, 150)); 
         leds.show();
         ledSequence++;
         lastLedChange = millis();
@@ -191,8 +241,8 @@ void updateLEDs() {
       if(ledSequence >= LED_COUNT && !ledsAllOn) {
         delay(500);
         ledsAllOn = true;
-        flashLEDs(0, 150, 0, 3); // Green flash
-        flashLEDs(150, 150, 150, 3); // White flash instead of blue
+        flashLEDs(0, 150, 0, 3); 
+        flashLEDs(150, 150, 150, 3);
       }
       break;
       
@@ -206,7 +256,6 @@ void updateLEDs() {
     }
       
     default:
-      // Maintain neutral white
       for(int i=0; i<LED_COUNT; i++) {
         leds.setPixelColor(i, leds.Color(100, 100, 100));
       }
@@ -229,7 +278,6 @@ void flashLEDs(uint8_t r, uint8_t g, uint8_t b, uint8_t times) {
 void updateEyes() {
   switch(currentState) {
     case STATE_BLINK_PHASE:
-      // Using built-in auto-blinker for smoother blinking
       eyes.update();
       break;
       
@@ -239,18 +287,19 @@ void updateEyes() {
       
     case STATE_EYES_CLOSED:
     case STATE_EYES_OPEN:
-      eyes.setHFlicker(OFF);  // Ensure no horizontal flickering during these states
-      eyes.setVFlicker(OFF);  // Ensure no vertical flickering during these states
+      eyes.setHFlicker(OFF);  
+      eyes.setVFlicker(OFF); 
       eyes.update();
       break;
       
     default:
-      // Don't update eyes during text display phases
       break;
   }
   
-  // Only display the eyes in eye-related states
   if(currentState >= STATE_EYES_CLOSED) {
     display.display();
   }
 }
+
+
+//if you reached here... thanks for taking a look.. hope you like the project.
