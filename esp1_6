@@ -1,0 +1,950 @@
+#include <SCServo.h>
+#include <WiFi.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <ArduinoJson.h>
+#include <HTTPClient.h>
+
+#define CAKE_SSID      "CAKE_ROBOT"
+#define CAKE_PASSWORD  "12121212"
+#define ESP2_IP        "192.168.4.2"
+#define HTTP_RETRY_COUNT 2
+#define HTTP_RETRY_DELAY 1000
+
+SCSCL sc;
+
+enum RobotMode { 
+  MODE_STANDING, 
+  MODE_WHEEL, 
+  MODE_TILTED_LEFT, 
+  MODE_TILTED_RIGHT 
+};
+
+enum SpeedPreset { SLOW = 200, MEDIUM = 400, FAST = 700 };
+
+#define LEFT_WHEEL_ID 1
+#define RIGHT_WHEEL_ID 3
+#define LEFT_FOOT_ID 4
+#define RIGHT_FOOT_ID 2
+
+struct SystemState {
+  RobotMode mode = MODE_STANDING;
+  float voltage = 0.0;
+  unsigned long uptime = 0;
+  unsigned long lastCommand = 0;
+  bool connected = false;
+  bool esp2Connected = false;
+  String stickyNote = "";
+  unsigned long stickyDuration = 0;
+  String currentTime = "13:05";
+  String currentDate = "25/05";
+};
+
+SystemState systemState;
+AsyncWebServer server(80);
+SpeedPreset currentSpeed = MEDIUM;
+uint8_t ledBrightness = 100; // Default: Medium
+String lastEsp2Command = "";
+
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>CAKE Companion</title>
+  <style>
+    :root {
+      --primary: #2196f3;
+      --secondary: #4caf50;
+      --background: #121212;
+      --surface: #1e1e1e;
+      --text: #f1f1f1;
+      --muted: #888;
+      --danger: #e53935;
+      --accent: #ffc107;
+      --selected: brightness(0.8);
+      --error: #ff4444;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+      -webkit-user-select: none;
+      -moz-user-select: none;
+      -ms-user-select: none;
+    }
+
+    html, body {
+      font-family: 'Segoe UI', Roboto, sans-serif;
+      background: var(--background);
+      color: var(--text);
+      padding: 16px;
+      margin: 0;
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    h2, h3 {
+      margin-bottom: 12px;
+      font-weight: 600;
+    }
+
+    .dashboard {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 16px;
+      width: 100%;
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    @media (min-width: 768px) {
+      .dashboard {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    .panel {
+      background: var(--surface);
+      padding: 16px;
+      border-radius: 8px;
+      box-shadow: 0 0 8px rgba(0,0,0,0.2);
+    }
+
+    .button-group {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    button {
+      padding: 12px;
+      background: var(--primary);
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    button:hover {
+      background: #42a5f5;
+    }
+
+    button:active {
+      transform: scale(0.98);
+    }
+
+    button.danger {
+      background: var(--danger);
+    }
+
+    button.selected {
+      filter: var(--selected);
+      border: 2px solid var(--accent);
+    }
+
+    button.error {
+      border: 2px solid var(--error);
+    }
+
+    input[type="number"], input[type="text"] {
+      width: 100%;
+      padding: 10px;
+      border-radius: 6px;
+      background: #2c2c2c;
+      color: var(--text);
+      border: none;
+      margin-top: 8px;
+      font-size: 14px;
+    }
+
+    select {
+      padding: 10px;
+      border-radius: 6px;
+      background: #2c2c2c;
+      color: var(--text);
+      border: none;
+      font-size: 14px;
+    }
+
+    .indicator {
+      margin: 12px 0;
+    }
+
+    .indicator-label {
+      margin-bottom: 4px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .progress-bar {
+      height: 16px;
+      background: #2f2f2f;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      height: 100%;
+      background: var(--secondary);
+      transition: width 0.4s ease;
+    }
+
+    .position-meter {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .meter-item {
+      background: #292929;
+      padding: 12px;
+      border-radius: 6px;
+      text-align: center;
+    }
+
+    .meter-title {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+
+    .meter-value {
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--accent);
+    }
+
+    .connection-status {
+      position: fixed;
+      top: 12px;
+      right: 12px;
+      padding: 6px 12px;
+      border-radius: 16px;
+      background: #444;
+      font-size: 12px;
+      font-weight: 500;
+      transition: background 0.3s ease;
+    }
+
+    .connected {
+      background: var(--secondary);
+      color: black;
+    }
+
+    .disconnected {
+      background: var(--danger);
+    }
+
+    .system-info {
+      margin-top: 16px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .system-info span {
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    .info-item {
+      margin-top: 6px;
+    }
+
+    .flex-container {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .esp2-status {
+      background: var(--danger);
+      color: white;
+      padding: 8px;
+      border-radius: 6px;
+      text-align: center;
+      margin-bottom: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="connection-status" id="connectionStatus">Connecting...</div>
+
+  <div class="dashboard">
+    <div class="panel">
+      <div class="esp2-status" id="esp2StatusBanner">ESP2 Disconnected</div>
+      <h2>Motion Control</h2>
+      <div class="button-group">
+        <button onclick="sendCommand('forward')">Forward</button>
+        <button onclick="sendCommand('backward')">Backward</button>
+        <button onclick="sendCommand('left')">Turn Left</button>
+        <button onclick="sendCommand('right')">Turn Right</button>
+      </div>
+      <button class="danger" onclick="sendCommand('stop')" style="margin-top: 12px;">Emergency Stop</button>
+
+      <h3 style="margin-top: 16px;">Posture & Modes</h3>
+      <div class="button-group">
+        <button onclick="sendCommand('stand')">Stand Mode</button>
+        <button onclick="sendCommand('wheel')">Wheel Mode</button>
+        <button onclick="sendCommand('tilt_left')">Tilt Left</button>
+        <button onclick="sendCommand('tilt_right')">Tilt Right</button>
+      </div>
+
+      <h3 style="margin-top: 16px;">Speed Preset</h3>
+      <div class="button-group">
+        <button id="speedSlow" onclick="changeSpeed(200)">Slow</button>
+        <button id="speedMedium" onclick="changeSpeed(400)" class="selected">Medium</button>
+        <button id="speedFast" onclick="changeSpeed(700)">Fast</button>
+      </div>
+
+      <h3 style="margin-top: 16px;">LED Modes</h3>
+      <div class="button-group">
+        <button onclick="changeLedMode('angry')" id="ledAngry" class="selected">Angry</button>
+        <button onclick="changeLedMode('calm')" id="ledCalm">Calm</button>
+        <button onclick="changeLedMode('pulse_blue')" id="ledPulseBlue">Pulse Blue</button>
+        <button onclick="changeLedMode('pulse_white')" id="ledPulseWhite">Pulse White</button>
+      </div>
+
+      <h3 style="margin-top: 16px;">LED Brightness</h3>
+      <div class="button-group">
+        <button id="brightnessLow" onclick="changeBrightness(50)">Low</button>
+        <button id="brightnessMedium" onclick="changeBrightness(100)" class="selected">Medium</button>
+        <button id="brightnessHigh" onclick="changeBrightness(150)">High</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>System Status</h2>
+
+      <div class="indicator">
+        <div class="indicator-label">Battery Voltage</div>
+        <div class="progress-bar">
+          <div class="progress-fill" id="voltageIndicator" style="width: 0%"></div>
+        </div>
+      </div>
+
+      <div class="position-meter">
+        <div class="meter-item">
+          <div class="meter-title">Left Wheel</div>
+          <div class="meter-value" id="posLw">--</div>
+        </div>
+        <div class="meter-item">
+          <div class="meter-title">Right Wheel</div>
+          <div class="meter-value" id="posRw">--</div>
+        </div>
+        <div class="meter-item">
+          <div class="meter-title">Left Foot</div>
+          <div class="meter-value" id="posLf">--</div>
+        </div>
+        <div class="meter-item">
+          <div class="meter-title">Right Foot</div>
+          <div class="meter-value" id="posRf">--</div>
+        </div>
+      </div>
+
+      <div class="system-info">
+        <div class="info-item">IP Address: <span id="ipAddress">--</span></div>
+        <div class="info-item">Uptime: <span id="uptime">--</span></div>
+        <div class="info-item">ESP1 Status: <span id="connectionTime">--</span></div>
+        <div class="info-item">ESP2 Status: <span id="esp2Status">--</span></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Sticky Notes</h2>
+      <div style="margin-top: 12px;">
+        <input type="text" id="stickyText" placeholder="Enter message">
+        <div class="flex-container">
+          <input type="number" id="stickyDuration" value="5" min="1" max="3600">
+          <select id="stickyUnit">
+            <option value="seconds">Seconds</option>
+            <option value="minutes">Minutes</option>
+          </select>
+          <button onclick="setStickyNote()">Set Note</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Health Reminders</h2>
+      <div style="margin-top: 12px;">
+        <div class="flex-container">
+          <input type="number" id="reminderInterval" value="60" min="1" max="1440" placeholder="Interval">
+          <select id="reminderUnit">
+            <option value="minutes">Minutes</option>
+            <option value="hours">Hours</option>
+          </select>
+          <button onclick="setReminder()">Set Reminder</button>
+          <button onclick="cancelReminder()" class="danger">Cancel Reminder</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Eye Animations</h2>
+      <div class="button-group">
+        <button onclick="changeEyeMode('angry')" id="eyeAngry" class="selected">Angry</button>
+        <button onclick="changeEyeMode('happy')" id="eyeHappy">Happy</button>
+        <button onclick="changeEyeMode('sleepy')" id="eyeSleepy">Sleepy</button>
+        <button onclick="changeEyeMode('normal')" id="eyeNormal">Normal</button>
+      </div>
+      <h3 style="margin-top: 16px;">Flicker Controls</h3>
+      <div class="button-group">
+        <button onclick="toggleHFlicker()" id="hFlicker">H-Flicker: OFF</button>
+        <button onclick="toggleVFlicker()" id="vFlicker" class="selected">V-Flicker: ON</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let lastUpdate = Date.now();
+    const connectionStatus = document.getElementById('connectionStatus');
+    const esp2StatusBanner = document.getElementById('esp2StatusBanner');
+    let currentSpeed = 400;
+    let currentLedMode = 'angry';
+    let currentBrightness = 100;
+    let currentEyeMode = 'angry';
+    let hFlickerOn = false;
+    let vFlickerOn = true;
+
+    async function fetchStatus() {
+      try {
+        const response = await fetch('/status');
+        if (!response.ok) throw new Error();
+        if (!window.datetimeSent) {
+          const now = new Date();
+          const date = `${now.getDate()}/${now.getMonth()+1}`;
+          const time = `${now.getHours()}:${now.getMinutes().toString().padStart(2,'0')}`;
+          await fetch(`/setdatetime?date=${date}&time=${time}`);
+          window.datetimeSent = true;
+        }
+        const data = await response.json();
+        lastUpdate = Date.now();
+        updateUI(data);
+
+        connectionStatus.classList.add('connected');
+        connectionStatus.classList.remove('disconnected');
+        connectionStatus.textContent = `Connected · ${formatTime(data.uptime)}`;
+        esp2StatusBanner.style.display = data.esp2Status === 'Connected' ? 'none' : 'block';
+        esp2StatusBanner.textContent = `ESP2 ${data.esp2Status}`;
+        esp2StatusBanner.className = `esp2-status ${data.esp2Status === 'Connected' ? 'connected' : 'disconnected'}`;
+      } catch (error) {
+        connectionStatus.classList.remove('connected');
+        connectionStatus.classList.add('disconnected');
+        connectionStatus.textContent = 'Disconnected';
+        esp2StatusBanner.style.display = 'block';
+        esp2StatusBanner.textContent = 'ESP2 Disconnected';
+        esp2StatusBanner.className = 'esp2-status disconnected';
+      }
+    }
+
+    function updateUI(data) {
+      const voltageFill = document.getElementById('voltageIndicator');
+      voltageFill.style.width = `${data.percentage}%`;
+      voltageFill.parentElement.previousElementSibling.textContent = `Battery: ${data.voltage}V (${data.percentage}%)`;
+
+      document.getElementById('posLw').textContent = data.positions.lw;
+      document.getElementById('posRw').textContent = data.positions.rw;
+      document.getElementById('posLf').textContent = data.positions.lf;
+      document.getElementById('posRf').textContent = data.positions.rf;
+
+      document.getElementById('ipAddress').textContent = data.ip;
+      document.getElementById('uptime').textContent = formatTime(data.uptime);
+      document.getElementById('connectionTime').textContent = data.esp1Status;
+      document.getElementById('esp2Status').textContent = data.esp2Status;
+    }
+
+    function formatTime(seconds) {
+      const h = Math.floor(seconds / 3600);
+      const m = Math.floor((seconds % 3600) / 60);
+      const s = seconds % 60;
+      return `${h}h ${m}m ${s}s`;
+    }
+
+    async function sendCommand(action) {
+      try {
+        const response = await fetch(`/cmd?action=${action}`);
+        if (!response.ok) throw new Error();
+        console.log(`Command ${action} sent successfully`);
+      } catch (error) {
+        console.error('Command failed:', error);
+      }
+    }
+
+    async function changeSpeed(preset) {
+      document.querySelectorAll('#speedSlow, #speedMedium, #speedFast').forEach(btn => {
+        btn.classList.toggle('selected', btn.id === `speed${preset === 200 ? 'Slow' : preset === 400 ? 'Medium' : 'Fast'}`);
+        btn.classList.remove('error');
+      });
+      try {
+        const response = await fetch(`/speed?preset=${preset}`);
+        if (!response.ok) throw new Error();
+        currentSpeed = preset;
+      } catch (error) {
+        console.error('Speed change failed:', error);
+        document.getElementById(`speed${preset === 200 ? 'Slow' : preset === 400 ? 'Medium' : 'Fast'}`).classList.add('error');
+      }
+    }
+
+    async function changeLedMode(mode) {
+      document.querySelectorAll('#ledAngry, #ledCalm, #ledPulseBlue, #ledPulseWhite').forEach(btn => {
+        btn.classList.toggle('selected', btn.id === `led${mode.charAt(0).toUpperCase() + mode.slice(1).replace('_', '')}`);
+        btn.classList.remove('error');
+      });
+      try {
+        const response = await fetch(`/sendcmd?do=ledmode:${mode}`);
+        if (!response.ok) throw new Error();
+        currentLedMode = mode;
+      } catch (error) {
+        console.error('LED mode change failed:', error);
+        document.getElementById(`led${mode.charAt(0).toUpperCase() + mode.slice(1).replace('_', '')}`).classList.add('error');
+      }
+    }
+
+    async function changeBrightness(value) {
+      document.querySelectorAll('#brightnessLow, #brightnessMedium, #brightnessHigh').forEach(btn => {
+        btn.classList.toggle('selected', btn.id === `brightness${value === 50 ? 'Low' : value === 100 ? 'Medium' : 'High'}`);
+        btn.classList.remove('error');
+      });
+      try {
+        const response = await fetch(`/sendcmd?do=brightness:${value}`);
+        if (!response.ok) throw new Error();
+        currentBrightness = value;
+      } catch (error) {
+        console.error('Brightness change failed:', error);
+        document.getElementById(`brightness${value === 50 ? 'Low' : value === 100 ? 'Medium' : 'High'}`).classList.add('error');
+      }
+    }
+
+    async function setStickyNote() {
+      const text = document.getElementById('stickyText').value;
+      const duration = document.getElementById('stickyDuration').value;
+      const unit = document.getElementById('stickyUnit').value;
+      
+      if (text && duration) {
+        const formData = new FormData();
+        formData.append('text', text);
+        formData.append('duration', duration);
+        formData.append('unit', unit);
+        
+        try {
+          const response = await fetch('/sticky', {
+            method: 'POST',
+            body: new URLSearchParams(formData)
+          });
+          if (!response.ok) throw new Error();
+        } catch (error) {
+          console.error('Failed to set note:', error);
+        }
+      }
+    }
+
+    async function setReminder() {
+      const interval = document.getElementById('reminderInterval').value;
+      const unit = document.getElementById('reminderUnit').value;
+      try {
+        const response = await fetch(`/sendcmd?do=reminder:${interval}|${unit}`);
+        if (!response.ok) throw new Error();
+      } catch (error) {
+        console.error('Failed to set reminder:', error);
+      }
+    }
+
+    async function cancelReminder() {
+      try {
+        const response = await fetch(`/sendcmd?do=cancel_reminder`);
+        if (!response.ok) throw new Error();
+      } catch (error) {
+        console.error('Failed to cancel reminder:', error);
+      }
+    }
+
+    async function changeEyeMode(mode) {
+      document.querySelectorAll('#eyeAngry, #eyeHappy, #eyeSleepy, #eyeNormal').forEach(btn => {
+        btn.classList.toggle('selected', btn.id === `eye${mode.charAt(0).toUpperCase() + mode.slice(1)}`);
+        btn.classList.remove('error');
+      });
+      try {
+        const response = await fetch(`/sendcmd?do=eyemode:${mode}`);
+        if (!response.ok) throw new Error();
+        currentEyeMode = mode;
+      } catch (error) {
+        console.error('Eye mode change failed:', error);
+        document.getElementById(`eye${mode.charAt(0).toUpperCase() + mode.slice(1)}`).classList.add('error');
+      }
+    }
+
+    async function toggleHFlicker() {
+      try {
+        const response = await fetch(`/sendcmd?do=flicker:h`);
+        if (!response.ok) throw new Error();
+        hFlickerOn = !hFlickerOn;
+        const btn = document.getElementById('hFlicker');
+        btn.textContent = `H-Flicker: ${hFlickerOn ? 'ON' : 'OFF'}`;
+        btn.classList.toggle('selected', hFlickerOn);
+        btn.classList.remove('error');
+      } catch (error) {
+        console.error('H-Flicker toggle failed:', error);
+        document.getElementById('hFlicker').classList.add('error');
+      }
+    }
+
+    async function toggleVFlicker() {
+      try {
+        const response = await fetch(`/sendcmd?do=flicker:v`);
+        if (!response.ok) throw new Error();
+        vFlickerOn = !vFlickerOn;
+        const btn = document.getElementById('vFlicker');
+        btn.textContent = `V-Flicker: ${vFlickerOn ? 'ON' : 'OFF'}`;
+        btn.classList.toggle('selected', vFlickerOn);
+        btn.classList.remove('error');
+      } catch (error) {
+        console.error('V-Flicker toggle failed:', error);
+        document.getElementById('vFlicker').classList.add('error');
+      }
+    }
+
+    setInterval(fetchStatus, 2000);
+    fetchStatus();
+
+    setInterval(() => {
+      const elapsed = Date.now() - lastUpdate;
+      if (elapsed > 4000) {
+        connectionStatus.classList.remove('connected');
+        connectionStatus.classList.add('disconnected');
+        connectionStatus.textContent = `Disconnected · ${Math.floor(elapsed / 1000)}s`;
+        esp2StatusBanner.style.display = 'block';
+        esp2StatusBanner.textContent = 'ESP2 Disconnected';
+        esp2StatusBanner.className = 'esp2-status disconnected';
+      }
+    }, 1000);
+  </script>
+</body>
+</html>
+)rawliteral";
+
+void setupWiFi() {
+  WiFi.softAP(CAKE_SSID, CAKE_PASSWORD);
+  Serial.println("[ESP1] SoftAP started");
+  Serial.print("[ESP1] IP Address: ");
+  Serial.println(WiFi.softAPIP());
+}
+
+bool sendToESP2(String command) {
+  String targetURL = "http://" + String(ESP2_IP) + "/cmd?do=" + command;
+  HTTPClient http;
+  bool success = false;
+
+  http.setTimeout(2000);
+  for (int i = 0; i < HTTP_RETRY_COUNT; i++) {
+    http.begin(targetURL);
+    int code = http.GET();
+    if (code == 200) {
+      success = true;
+      lastEsp2Command = "";
+      Serial.println("[ESP1] Command sent to ESP2: " + command);
+      break;
+    }
+    http.end();
+    Serial.println("[ESP1] Retry " + String(i + 1) + " failed for: " + command);
+    delay(HTTP_RETRY_DELAY);
+    yield();
+  }
+  http.end();
+  if (!success) lastEsp2Command = command;
+  systemState.esp2Connected = success;
+  return success;
+}
+
+void setupServer() {
+  server.on("/sendcmd", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!request->hasParam("do")) {
+      Serial.println("[ESP1] Error: Missing command parameter");
+      request->send(400, "text/plain", "Missing command parameter");
+      return;
+    }
+
+    String command = request->getParam("do")->value();
+    if (sendToESP2(command)) {
+      Serial.println("[ESP1] Acknowledged: Command sent: " + command);
+      request->send(200, "text/plain", "Sent: " + command);
+    } else {
+      Serial.println("[ESP1] Error: Failed to send to ESP2: " + command);
+      request->send(500, "text/plain", "Failed to send to ESP2");
+    }
+  });
+
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    Serial.println("[ESP1] Serving web interface");
+    request->send_P(200, "text/html", index_html);
+  });
+
+  server.on("/cmd", HTTP_GET, [](AsyncWebServerRequest *request) {
+    systemState.lastCommand = millis();
+    if (request->hasParam("action")) {
+      String action = request->getParam("action")->value();
+      Serial.println("[ESP1] Received command: " + action);
+      handleCommand(request);
+    }
+    Serial.println("[ESP1] Acknowledged: Command processed");
+    request->send(200, "text/plain", "OK");
+  });
+
+  server.on("/status", HTTP_GET, [](AsyncWebServerRequest *request) {
+    DynamicJsonDocument doc(512);
+    doc["mode"] = systemState.mode == MODE_STANDING ? "Standing" :
+                  systemState.mode == MODE_WHEEL ? "Wheel" :
+                  systemState.mode == MODE_TILTED_LEFT ? "Tilted Left" : "Tilted Right";
+    doc["voltage"] = systemState.voltage;
+    doc["percentage"] = map(systemState.voltage * 10, 60, 84, 0, 100);
+    doc["ip"] = WiFi.softAPIP().toString();
+    doc["uptime"] = millis() / 1000;
+    doc["esp1Status"] = systemState.connected ? "Connected" : "Disconnected";
+    doc["esp2Status"] = systemState.esp2Connected ? "Connected" : "Disconnected";
+    
+    JsonObject positions = doc.createNestedObject("positions");
+    int lwPos = sc.ReadPos(LEFT_WHEEL_ID);
+    int rwPos = sc.ReadPos(RIGHT_WHEEL_ID);
+    int lfPos = sc.ReadPos(LEFT_FOOT_ID);
+    int rfPos = sc.ReadPos(RIGHT_FOOT_ID);
+    positions["lw"] = lwPos != -1 ? String(lwPos) : "--";
+    positions["rw"] = rwPos != -1 ? String(rwPos) : "--";
+    positions["lf"] = lfPos != -1 ? String(lfPos) : "--";
+    positions["rf"] = rfPos != -1 ? String(rfPos) : "--";
+    
+    String response;
+    serializeJson(doc, response);
+    Serial.println("[ESP1] Sending status: " + response);
+    request->send(200, "application/json", response);
+  });
+
+  server.on("/speed", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (request->hasParam("preset")) {
+      int preset = request->getParam("preset")->value().toInt();
+      currentSpeed = (SpeedPreset)constrain(preset, 200, 700);
+      Serial.println("[ESP1] Speed set to: " + String(preset));
+    }
+    request->send(200, "text/plain", "OK");
+  });
+
+  server.on("/setdatetime", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (request->hasParam("date") && request->hasParam("time")) {
+      String date = request->getParam("date")->value();
+      String time = request->getParam("time")->value();
+      if (date.length() >= 5 && time.length() >= 5) {
+        systemState.currentDate = date;
+        systemState.currentTime = time;
+        String command = "datetime:" + date + "," + time;
+        if (sendToESP2(command)) {
+          Serial.println("[ESP1] DateTime set: " + date + ", " + time);
+        } else {
+          Serial.println("[ESP1] Error: Failed to set DateTime on ESP2");
+        }
+      } else {
+        Serial.println("[ESP1] Error: Invalid DateTime format");
+      }
+    }
+    request->send(200, "text/plain", "OK");
+  });
+
+  server.on("/sticky", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (request->hasParam("text", true) && request->hasParam("duration", true) && request->hasParam("unit", true)) {
+      String note = request->getParam("text", true)->value();
+      String duration = request->getParam("duration", true)->value();
+      String unit = request->getParam("unit", true)->value();
+      unsigned long durationMs = unit == "minutes" ? duration.toInt() * 60000 : duration.toInt() * 1000;
+      String command = "sticky:" + note + "|" + String(durationMs);
+      if (sendToESP2(command)) {
+        Serial.println("[ESP1] Sticky note set: " + note + ", duration: " + duration + " " + unit);
+        request->send(200, "text/plain", "OK");
+      } else {
+        Serial.println("[ESP1] Error: Failed to set sticky note on ESP2");
+        request->send(500, "text/plain", "Failed to send to ESP2");
+      }
+    } else {
+      Serial.println("[ESP1] Error: Missing sticky note parameters");
+      request->send(400, "text/plain", "Missing parameters");
+    }
+  });
+
+  server.begin();
+  Serial.println("[ESP1] WebServer started");
+}
+
+void setup() {
+  Serial.begin(115200);
+  Serial1.begin(1000000, SERIAL_8N1, 18, 19);
+  sc.pSerial = &Serial1;
+
+  Serial.println("[ESP1] Initializing servos");
+  configureServos();
+  Serial.println("[ESP1] Setting up WiFi");
+  setupWiFi();
+  Serial.println("[ESP1] Setting up server");
+  setupServer();
+}
+
+void loop() {
+  unsigned long currentMillis = millis();
+  
+  static unsigned long lastUpdate;
+  if (currentMillis - lastUpdate >= 2000) {
+    updateBattery();
+    systemState.uptime = currentMillis / 1000;
+    lastUpdate = currentMillis;
+    Serial.println("[ESP1] Battery: " + String(systemState.voltage) + "V, Uptime: " + String(systemState.uptime) + "s");
+  }
+
+  if (currentMillis - systemState.lastCommand > 5000 && systemState.connected) {
+    Serial.println("[ESP1] No commands received, initiating emergency stop");
+    emergencyStop();
+    systemState.connected = false;
+  }
+
+  if (systemState.voltage < 6.2 && systemState.voltage > 0.0) {
+    if (sendToESP2("lowbattery")) {
+      Serial.println("[ESP1] Low battery warning sent to ESP2");
+    } else {
+      Serial.println("[ESP1] Error: Failed to send low battery warning to ESP2");
+    }
+  }
+
+  if (!systemState.esp2Connected && lastEsp2Command != "" && currentMillis - lastUpdate >= 5000) {
+    sendToESP2(lastEsp2Command);
+  }
+
+  yield();
+}
+
+void configureServos() {
+  for (int id : {LEFT_WHEEL_ID, RIGHT_WHEEL_ID}) {
+    sc.unLockEprom(id);
+    sc.PWMMode(id);
+    sc.LockEprom(id);
+    sc.EnableTorque(id, 1);
+    Serial.println("[ESP1] Configured servo ID: " + String(id));
+  }
+
+  for (int id : {LEFT_FOOT_ID, RIGHT_FOOT_ID}) {
+    sc.unLockEprom(id);
+    if (sc.WritePos(id, (id == LEFT_FOOT_ID) ? 490 : 530, 0, 400) == 0) {
+      Serial.println("[ESP1] Error: Failed to set position for servo ID: " + String(id));
+    } else {
+      Serial.println("[ESP1] Set position for servo ID: " + String(id));
+    }
+    sc.LockEprom(id);
+    sc.EnableTorque(id, 1);
+  }
+}
+
+void moveWheels(int left, int right) {
+  if (sc.WritePWM(LEFT_WHEEL_ID, constrain(left, -1000, 1000)) == 0 ||
+      sc.WritePWM(RIGHT_WHEEL_ID, constrain(right, -1000, 1000)) == 0) {
+    Serial.println("[ESP1] Error: Failed to set wheel PWM");
+  } else {
+    Serial.println("[ESP1] Wheel PWM set: Left=" + String(left) + ", Right=" + String(right));
+  }
+}
+
+void tiltLeft() {
+  unsigned long start = millis();
+  while (millis() - start < 400) {
+    if (sc.WritePos(RIGHT_FOOT_ID, 650, 0, 0) == 0 || sc.WritePos(LEFT_FOOT_ID, 570, 0, 0) == 0) {
+      Serial.println("[ESP1] Error: Failed to tilt left");
+      return;
+    }
+    yield();
+  }
+  systemState.mode = MODE_TILTED_LEFT;
+  Serial.println("[ESP1] Tilted left");
+}
+
+void tiltRight() {
+  unsigned long start = millis();
+  while (millis() - start < 400) {
+    if (sc.WritePos(LEFT_FOOT_ID, 390, 0, 0) == 0 || sc.WritePos(RIGHT_FOOT_ID, 470, 0, 0) == 0) {
+      Serial.println("[ESP1] Error: Failed to tilt right");
+      return;
+    }
+    yield();
+  }
+  systemState.mode = MODE_TILTED_RIGHT;
+  Serial.println("[ESP1] Tilted right");
+}
+
+void updateBattery() {
+  float total = 0.0;
+  int count = 0;
+  for (int id : {LEFT_WHEEL_ID, RIGHT_FOOT_ID}) {
+    int raw = sc.ReadVoltage(id);
+    if (raw != -1) {
+      total += raw * 0.1;
+      count++;
+    } else {
+      Serial.println("[ESP1] Error: Failed to read voltage from servo ID: " + String(id));
+    }
+  }
+  systemState.voltage = count > 0 ? total / count : 0.0;
+}
+
+void emergencyStop() {
+  moveWheels(0, 0);
+  setStandingMode();
+  Serial.println("[ESP1] Emergency stop executed");
+}
+
+void handleCommand(AsyncWebServerRequest *request) {
+  String action = request->getParam("action")->value();
+  
+  if (action == "forward") {
+    moveWheels(currentSpeed, -currentSpeed);
+    systemState.connected = true;
+  } else if (action == "backward") {
+    moveWheels(-currentSpeed, currentSpeed);
+    systemState.connected = true;
+  } else if (action == "left") {
+    moveWheels(-currentSpeed, -currentSpeed);
+    systemState.connected = true;
+  } else if (action == "right") {
+    moveWheels(currentSpeed, currentSpeed);
+    systemState.connected = true;
+  } else if (action == "stop") {
+    moveWheels(0, 0);
+  } else if (action == "tilt_left") {
+    tiltLeft();
+  } else if (action == "tilt_right") {
+    tiltRight();
+  } else if (action == "stand") {
+    setStandingMode();
+  } else if (action == "wheel") {
+    setWheelMode();
+  }
+}
+
+void setStandingMode() {
+  systemState.mode = MODE_STANDING;
+  if (sc.WritePos(LEFT_FOOT_ID, 490, 0, 400) == 0 || sc.WritePos(RIGHT_FOOT_ID, 530, 0, 400) == 0) {
+    Serial.println("[ESP1] Error: Failed to set standing mode");
+  } else {
+    Serial.println("[ESP1] Set standing mode");
+  }
+}
+
+void setWheelMode() {
+  systemState.mode = MODE_WHEEL;
+  if (sc.WritePos(LEFT_FOOT_ID, 764, 0, 400) == 0 || sc.WritePos(RIGHT_FOOT_ID, 250, 0, 400) == 0) {
+    Serial.println("[ESP1] Error: Failed to set wheel mode");
+  } else {
+    Serial.println("[ESP1] Set wheel mode");
+  }
+}
